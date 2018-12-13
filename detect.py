@@ -8,7 +8,9 @@ from PIL import Image, ImageFont, ImageDraw
 from utils import letterbox_image, load_weights
 
 # 指定使用GPU的Index
-os.environ["CUDA_VISIBLE_DEVICES"] = config.gpu_index
+# os.environ["CUDA_VISIBLE_DEVICES"] = config.gpu_index
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+
 
 def detect(image_path, model_path, yolo_weights = None):
     """
@@ -28,7 +30,7 @@ def detect(image_path, model_path, yolo_weights = None):
     input_image_shape = tf.placeholder(dtype = tf.int32, shape = (2,))
     input_image = tf.placeholder(shape = [None, 416, 416, 3], dtype = tf.float32)
     predictor = yolo_predictor(config.obj_threshold, config.nms_threshold, config.classes_path, config.anchors_path)
-    boxes, scores, classes = predictor.predict(input_image, input_image_shape)
+    boxes, scores, classes = predictor.predict(input_image, input_image_shape, is_reuse=False)
     with tf.Session() as sess:
         if yolo_weights is not None:
             with tf.variable_scope('predict'):
@@ -37,7 +39,9 @@ def detect(image_path, model_path, yolo_weights = None):
             sess.run(load_op)
         else:
             saver = tf.train.Saver()
-            saver.restore(sess, model_path)
+            model_file = tf.train.latest_checkpoint(model_path)
+
+            saver.restore(sess, model_file)
         out_boxes, out_scores, out_classes = sess.run(
             [boxes, scores, classes],
             feed_dict={
@@ -83,12 +87,12 @@ def detect(image_path, model_path, yolo_weights = None):
         image.save('./result1.jpg')
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(argument_default = argparse.SUPPRESS)
-    parser.add_argument(
-        '--image_file', type = str, help = 'image file path'
-    )
-    FLAGS = parser.parse_args()
+    # parser = argparse.ArgumentParser(argument_default = argparse.SUPPRESS)
+    # parser.add_argument(
+    #     '--image_file', type = str, help = 'image file path'
+    # )
+    # FLAGS = parser.parse_args()
     if config.pre_train_yolo3 == True:
-        detect(FLAGS.image_file, config.model_dir, config.yolo3_weights_path)
+        detect('./model_data/1.jpg', config.model_dir, config.yolo3_weights_path)
     else:
-        detect(FLAGS.image_file, config.model_dir)
+        detect('./model_data/1.jpg', config.model_dir)

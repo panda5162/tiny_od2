@@ -10,6 +10,7 @@ from collections import defaultdict
 from yolo_predict import yolo_predictor
 from utils import draw_box, load_weights, letterbox_image, voc_ap
 import tensorlayer as tl
+from tensorflow.python.client import device_lib
 
 # 指定使用GPU的Index
 os.environ["CUDA_VISIBLE_DEVICES"] = config.gpu_index
@@ -18,59 +19,85 @@ alpha = config.alpha
 beta = config.beta
 
 
+def check_available_gpus():
+    local_devices = device_lib.list_local_devices()
+    gpu_names = [x.name for x in local_devices if x.device_type == 'GPU']
+    gpu_num = len(gpu_names)
+
+    print('{0} GPUs are detected : {1}'.format(gpu_num, gpu_names))
+
+    return gpu_num
+
 def train():
     """
     Introduction
     ------------
         训练模型
     """
-    train_reader = Reader('train', config.data_dir, config.anchors_path, config.num_classes, input_shape = config.input_shape, max_boxes = config.max_boxes)
-    train_data = train_reader.build_dataset(config.train_batch_size)
-    is_training = tf.placeholder(tf.bool, shape = [])
+    # gpu_num = check_available_gpus()
+    #
+    # for gpu_id in range(int(gpu_num)):
+    # with tf.device(tf.DeviceSpec(device_type="GPU", device_index=gpu_id)):
 
-    iterator = train_data.make_one_shot_iterator()
-    images, bbox, bbox_true_13, bbox_true_26, bbox_true_52 = iterator.get_next()
-    images.set_shape([None, config.input_shape, config.input_shape, 3])
-    bbox.set_shape([None, config.max_boxes, 5])
-    grid_shapes = [config.input_shape // 32, config.input_shape // 16, config.input_shape // 8]
-    lr_images = tf.image.resize_images(images, size=[config.input_shape // 4, config.input_shape // 4], method=0,
-                                       align_corners=False)
-    lr_images.set_shape([None, config.input_shape // 4, config.input_shape // 4, 3])
+        # with tf.variable_scope(tf.get_variable_scope(), reuse=(gpu_id > 0)):
+    with tf.variable_scope(tf.get_variable_scope(), reuse=False):
+        train_reader = Reader('train', config.data_dir, config.anchors_path, config.num_classes,
+                              input_shape=config.input_shape, max_boxes=config.max_boxes)
+        train_data = train_reader.build_dataset(config.train_batch_size)
+        is_training = tf.placeholder(tf.bool, shape=[])
 
-    bbox_true_13.set_shape([None, grid_shapes[0], grid_shapes[0], 3, 5 + config.num_classes])
-    bbox_true_26.set_shape([None, grid_shapes[1], grid_shapes[1], 3, 5 + config.num_classes])
-    bbox_true_52.set_shape([None, grid_shapes[2], grid_shapes[2], 3, 5 + config.num_classes])
-    draw_box(images, bbox)
-    model = yolo(config.norm_epsilon, config.norm_decay, config.anchors_path, config.classes_path, config.pre_train)
-    bbox_true = [bbox_true_13, bbox_true_26, bbox_true_52]
+        iterator = train_data.make_one_shot_iterator()
+        images, bbox, bbox_true_13, bbox_true_26, bbox_true_52 = iterator.get_next()
 
-    g_img1 = model.GAN_g1(lr_images)
-    g_img = model.GAN_g(lr_images)
-    # with tf.variable_scope("d_real"):
-    d_real = model.yolo_inference(images, config.num_anchors / 3, config.num_classes, reuse=False, training=True)
-    # with tf.variable_scope("d_fake"):
-    d_fake = model.yolo_inference(g_img.outputs, config.num_anchors / 3, config.num_classes, reuse=True, training=True)
+        images.set_shape([None, config.input_shape, config.input_shape, 3])
+        bbox.set_shape([None, config.max_boxes, 5])
+        grid_shapes = [config.input_shape // 32, config.input_shape // 16, config.input_shape // 8]
+        lr_images = tf.image.resize_images(images, size=[config.input_shape // 4, config.input_shape // 4],
+                                           method=0,
+                                           align_corners=False)
+        lr_images.set_shape([None, config.input_shape // 4, config.input_shape // 4, 3])
+
+        bbox_true_13.set_shape([None, grid_shapes[0], grid_shapes[0], 3, 5 + config.num_classes])
+        bbox_true_26.set_shape([None, grid_shapes[1], grid_shapes[1], 3, 5 + config.num_classes])
+        bbox_true_52.set_shape([None, grid_shapes[2], grid_shapes[2], 3, 5 + config.num_classes])
+        draw_box(images, bbox)
+        model = yolo(config.norm_epsilon, config.norm_decay, config.anchors_path, config.classes_path,
+                     config.pre_train)
+        bbox_true = [bbox_true_13, bbox_true_26, bbox_true_52]
+
+        g_img1 = model.GAN_g1(lr_images)
+        g_img = model.GAN_g(lr_images)
+        # with tf.variable_scope("d_real"):
+        d_real = model.yolo_inference(images, config.num_anchors / 3, config.num_classes, reuse=False,
+                                      training=True)
+        # with tf.variable_scope("d_fake"):
+        d_fake = model.yolo_inference(g_img.outputs, config.num_anchors / 3, config.num_classes, reuse=True,
+                                      training=True)
+
+        tf.summary.image('input', images, max_outputs=3)
+
+        d_loss1 = model.yolo_loss(d_real, bbox_true, model.anchors, config.num_classes, 1, config.ignore_thresh)
+        d_loss2 = model.yolo_loss(d_fake, bbox_true, model.anchors, config.num_classes, 0, config.ignore_thresh)
+        d_loss = d_loss1 + d_loss2
+        l2_loss = tf.losses.get_regularization_loss()
+        d_loss += l2_loss
+
+        adv_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.ones_like(d_fake[3]), logits=d_fake[3])
+        # adv_loss = 1e-3 * tf.reduce_sum(adv_loss) / tf.cast(tf.shape(d_fake[3])[0], tf.float32)
+        adv_loss = tf.reduce_sum(adv_loss) / tf.cast(tf.shape(d_fake[3])[0], tf.float32)
+        mse_loss1 = tl.cost.mean_squared_error(g_img1.outputs, images, is_mean=True)
+        mse_loss1 = tf.reduce_sum(mse_loss1) / tf.cast(tf.shape(g_img1.outputs)[0], tf.float32)
+        mse_loss2 = tl.cost.mean_squared_error(g_img.outputs, images, is_mean=True)
+        mse_loss2 = tf.reduce_sum(mse_loss2) / tf.cast(tf.shape(g_img.outputs)[0], tf.float32)
+        mse_loss = mse_loss1 + mse_loss2
+        # clc_loss = 2e-6 * d_loss2
+        clc_loss = d_loss2
+        g_loss = mse_loss + clc_loss + adv_loss
+        l2_loss = tf.losses.get_regularization_loss()
+        g_loss += l2_loss
 
 
-
-    d_loss1 = 0.005 * model.yolo_loss(d_real, bbox_true, model.anchors, config.num_classes, 1, config.ignore_thresh)
-    d_loss2 = model.yolo_loss(d_fake, bbox_true, model.anchors, config.num_classes, 0, config.ignore_thresh)
-    d_loss = d_loss1 + d_loss2
-    l2_loss = tf.losses.get_regularization_loss()
-    d_loss += l2_loss
-
-    adv_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.zeros_like(d_fake[3]), logits=d_fake[3])
-    adv_loss = 1e-3 * tf.reduce_sum(adv_loss) / tf.cast(tf.shape(d_fake[3])[0], tf.float32)
-    mse_loss1 = tl.cost.mean_squared_error(g_img1.outputs, images, is_mean=True)
-    mse_loss1 = tf.reduce_sum(mse_loss1) / tf.cast(tf.shape(g_img1.outputs)[0], tf.float32)
-    mse_loss2 = tl.cost.mean_squared_error(g_img.outputs, images, is_mean=True)
-    mse_loss2 = tf.reduce_sum(mse_loss2) / tf.cast(tf.shape(g_img.outputs)[0], tf.float32)
-    mse_loss = mse_loss1 + mse_loss2
-    clc_loss = 2e-6 * d_loss2
-    g_loss = mse_loss + clc_loss + adv_loss
-    l2_loss = tf.losses.get_regularization_loss()
-    g_loss += l2_loss
-
+    # tf.summary.image('img', images, 3)
     tf.summary.scalar('d_loss', d_loss)
     tf.summary.scalar('g_loss', g_loss)
     merged_summary = tf.summary.merge_all()
@@ -85,11 +112,6 @@ def train():
             train_var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='yolo')
             train_opd = optimizer.minimize(loss = d_loss, global_step = global_step, var_list = train_var)
             train_opg = optimizer.minimize(loss=g_loss, global_step = global_step, var_list = train_var)
-            # train_opd1 = optimizer.minimize(loss=d_loss1, global_step = global_step, var_list = train_var)
-            # train_opd2 = optimizer.minimize(loss=d_loss2, global_step = global_step, var_list = train_var)
-            # train_opadv = optimizer.minimize(loss=adv_loss, global_step = global_step, var_list = train_var)
-            # train_opmse = optimizer.minimize(loss=mse_loss, global_step = global_step, var_list = train_var)
-            # train_opclc = optimizer.minimize(loss=clc_loss, global_step = global_step, var_list = train_var)
 
 
         else:
@@ -98,7 +120,7 @@ def train():
 
     init = tf.global_variables_initializer()
     saver = tf.train.Saver()
-    with tf.Session(config = tf.ConfigProto(log_device_placement = False)) as sess:
+    with tf.Session(config = tf.ConfigProto(log_device_placement = False, allow_soft_placement=True)) as sess:
         ckpt = tf.train.get_checkpoint_state(config.model_dir)
         if ckpt and tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
             print('restore model', ckpt.model_checkpoint_path)
@@ -109,8 +131,8 @@ def train():
             load_ops = load_weights(tf.global_variables(scope = 'darknet53'), config.darknet53_weights_path)
             sess.run(load_ops)
         summary_writer = tf.summary.FileWriter(config.log_dir, sess.graph)
-        # dloss_value = 0
-        # gloss_value = 0
+        dloss_value = 0
+        gloss_value = 0
         # dloss1_value = 0
         # dloss2_value = 0
         # adv_value = 0
@@ -121,43 +143,33 @@ def train():
                 start_time = time.time()
                 train_dloss, summary, global_step_value, _ = sess.run([d_loss, merged_summary, global_step, train_opd], {is_training : True})
                 train_gloss, summary, global_step_value, _ = sess.run([g_loss, merged_summary, global_step, train_opg], {is_training : True})
-                #
-                # train_dloss1, summary, global_step_value, _ = sess.run([d_loss1, merged_summary, global_step, train_opd1], {is_training : True})
-                # train_dloss2, summary, global_step_value, _ = sess.run([d_loss2, merged_summary, global_step, train_opd2], {is_training : True})
-                # train_adv, summary, global_step_value, _ = sess.run([adv_loss, merged_summary, global_step, train_opadv], {is_training : True})
-                # train_mse, summary, global_step_value, _ = sess.run([mse_loss, merged_summary, global_step, train_opmse], {is_training : True})
-                # train_clc, summary, global_step_value, _ = sess.run([clc_loss, merged_summary, global_step, train_opclc], {is_training : True})
 
-                dloss_value = train_dloss
-                # dloss1_value = train_dloss1
-                # dloss2_value = train_dloss2
-                gloss_value = train_gloss
-                # adv_value = train_adv
-                # mse_value = train_mse
-                # clc_value = train_clc
+                # dloss_value = train_dloss
+                dloss_value += train_dloss
+
+                # gloss_value = train_gloss
+                gloss_value += train_gloss
+
 
                 duration = time.time() - start_time
                 examples_per_sec = float(duration) / config.train_batch_size
                 format_str1 = ('Epoch {} step {},  train dloss = {} train gloss = {} ( {} examples/sec; {} ''sec/batch)')
-                print(format_str1.format(epoch, step, dloss_value / global_step_value, gloss_value / global_step_value, examples_per_sec, duration))
+                # print(format_str1.format(epoch, step, dloss_value / global_step_value, gloss_value / global_step_value, examples_per_sec, duration))
+                print(format_str1.format(epoch, step, train_dloss, train_gloss, examples_per_sec, duration))
 
-                # format_str = ('Epoch {} step {},  train dloss = {} d_loss1 = {} d_loss2 = {}, train gloss = {} adv_loss = {} mse_loss = {} clc_loss = {} ( {} examples/sec; {} ''sec/batch)')
-                # print(format_str.format(epoch, step, dloss_value / global_step_value, dloss1_value / global_step_value, dloss2_value / global_step_value, gloss_value / global_step_value, adv_value / global_step_value, mse_value / global_step_value, clc_value / global_step_value, examples_per_sec, duration))
-
-
-
-                summary_writer.add_summary(summary = tf.Summary(value = [tf.Summary.Value(tag = "train dloss", simple_value = train_dloss)]), global_step = step)
-                summary_writer.add_summary(summary = tf.Summary(value = [tf.Summary.Value(tag = "train gloss", simple_value = train_gloss)]), global_step = step)
+                summary_writer.add_summary(summary=tf.Summary(value = [tf.Summary.Value(tag = "train dloss", simple_value = train_dloss)]), global_step = step)
+                summary_writer.add_summary(summary=tf.Summary(value = [tf.Summary.Value(tag = "train gloss", simple_value = train_gloss)]), global_step = step)
 
                 summary_writer.add_summary(summary, step)
                 summary_writer.flush()
             # 每3个epoch保存一次模型
-            if epoch % 3 == 0:
-                checkpoint_path = os.path.join(config.model_dir, 'model.ckpt')
-                saver.save(sess, checkpoint_path, global_step = global_step)
+            # if epoch % 3 == 0:
+            checkpoint_path = os.path.join(config.model_dir, 'model.ckpt')
+            saver.save(sess, checkpoint_path, global_step=global_step)
 
 
-def eval(model_path, min_Iou = 0.5, yolo_weights = None):
+
+def eval(model_path, min_Iou = 0.5, yolo_weights=None):
     """
     Introduction
     ------------
@@ -167,20 +179,22 @@ def eval(model_path, min_Iou = 0.5, yolo_weights = None):
     class_pred = defaultdict(list)
     gt_counter_per_class = defaultdict(int)
     input_image_shape = tf.placeholder(dtype = tf.int32, shape = (2,))
-    input_image = tf.placeholder(shape = [None, 96, 96, 3], dtype = tf.float32)
+    input_image = tf.placeholder(shape = [None, 416, 416, 3], dtype = tf.float32)
     predictor = yolo_predictor(config.obj_threshold, config.nms_threshold, config.classes_path, config.anchors_path)
-    boxes, scores, classes = predictor.predict(input_image, input_image_shape)
-    val_Reader = Reader("val", config.data_dir, config.anchors_path, config.num_classes, input_shape = config.input_shape, max_boxes = config.max_boxes)
+    boxes, scores, classes = predictor.predict(input_image, input_image_shape, is_reuse=False)
+    val_Reader = Reader("val", config.data_dir, config.anchors_path, config.num_classes, input_shape=config.input_shape,
+                        max_boxes=config.max_boxes)
     image_files, bboxes_data = val_Reader.read_annotations()
     with tf.Session() as sess:
         if yolo_weights is not None:
             with tf.variable_scope('predict'):
                 boxes, scores, classes = predictor.predict(input_image, input_image_shape)
-            load_op = load_weights(tf.global_variables(scope = 'predict'), weights_file = yolo_weights)
+            load_op = load_weights(tf.global_variables(scope='predict'), weights_file=yolo_weights)
             sess.run(load_op)
         else:
             saver = tf.train.Saver()
-            saver.restore(sess, model_path)
+            model_file = tf.train.latest_checkpoint(model_path)
+            saver.restore(sess, model_file)
         for index in range(len(image_files)):
             val_bboxes = []
             image_file = image_files[index]
@@ -189,22 +203,27 @@ def eval(model_path, min_Iou = 0.5, yolo_weights = None):
                 left, top, right, bottom, class_id = bbox[0], bbox[1], bbox[2], bbox[3], bbox[4]
                 class_name = val_Reader.class_names[int(class_id)]
                 bbox = [float(left), float(top), float(right), float(bottom)]
-                val_bboxes.append({"class_name" : class_name, "bbox": bbox, "used": False})
+                val_bboxes.append({"class_name": class_name, "bbox": bbox, "used": False})
+
                 gt_counter_per_class[class_name] += 1
+                # print(gt_counter_per_class[class_name])
+
             ground_truth[file_id] = val_bboxes
+
             image = Image.open(image_file)
-            resize_image = letterbox_image(image, (96, 96))
-            image_data = np.array(resize_image, dtype = np.float32)
+            resize_image = letterbox_image(image, (416, 416))
+            image_data = np.array(resize_image, dtype=np.float32)
             image_data /= 255.
-            image_data = np.expand_dims(image_data, axis = 0)
+            image_data = np.expand_dims(image_data, axis=0)
 
             out_boxes, out_scores, out_classes = sess.run(
                 [boxes, scores, classes],
-                feed_dict = {
-                    input_image : image_data,
-                    input_image_shape : [image.size[1], image.size[0]]
+                feed_dict={
+                    input_image: image_data,
+                    input_image_shape: [image.size[1], image.size[0]]
                 })
             print("detect {}/{} found boxes: {}".format(index, len(image_files), len(out_boxes)))
+
             for o, c in enumerate(out_classes):
                 predicted_class = val_Reader.class_names[c]
                 box = out_boxes[o]
@@ -218,6 +237,8 @@ def eval(model_path, min_Iou = 0.5, yolo_weights = None):
 
                 bbox = [left, top, right, bottom]
                 class_pred[predicted_class].append({"confidence": str(score), "file_id": file_id, "bbox": bbox})
+                # print(class_pred[predicted_class])
+        # print(ground_truth['000000026204'])
 
     # 计算每个类别的AP
     sum_AP = 0.0
@@ -227,6 +248,7 @@ def eval(model_path, min_Iou = 0.5, yolo_weights = None):
         predictions_data = class_pred[class_name]
         # 该类别总共有多少个box
         nd = len(predictions_data)
+
         tp = [0] * nd  # true positive
         fp = [0] * nd  # false positive
         for idx, prediction in enumerate(predictions_data):
@@ -238,11 +260,14 @@ def eval(model_path, min_Iou = 0.5, yolo_weights = None):
             for obj in ground_truth_data:
                 if obj['class_name'] == class_name:
                     bbox_gt = obj['bbox']
-                    bbox_intersect = [max(bbox_pred[0], bbox_gt[0]), max(bbox_gt[1], bbox_pred[1]), min(bbox_gt[2], bbox_pred[2]), min(bbox_gt[3], bbox_pred[3])]
+                    bbox_intersect = [max(bbox_pred[0], bbox_gt[0]), max(bbox_gt[1], bbox_pred[1]),
+                                      min(bbox_gt[2], bbox_pred[2]), min(bbox_gt[3], bbox_pred[3])]
                     intersect_weight = bbox_intersect[2] - bbox_intersect[0] + 1
                     intersect_high = bbox_intersect[3] - bbox_intersect[1] + 1
                     if intersect_high > 0 and intersect_weight > 0:
-                        union_area = (bbox_pred[2] - bbox_pred[0] + 1) * (bbox_pred[3] - bbox_pred[1] + 1) + (bbox_gt[2] - bbox_gt[0] + 1) * (bbox_gt[3] - bbox_gt[1] + 1) - intersect_weight * intersect_high
+                        union_area = (bbox_pred[2] - bbox_pred[0] + 1) * (bbox_pred[3] - bbox_pred[1] + 1) + (
+                                    bbox_gt[2] - bbox_gt[0] + 1) * (
+                                                 bbox_gt[3] - bbox_gt[1] + 1) - intersect_weight * intersect_high
                         Iou = intersect_high * intersect_weight / union_area
                         if Iou > Iou_max:
                             Iou_max = Iou
@@ -276,8 +301,152 @@ def eval(model_path, min_Iou = 0.5, yolo_weights = None):
     MAP = sum_AP / len(gt_counter_per_class) * 100
     print("The Model Eval MAP: {}".format(MAP))
 
+    # val_Reader = Reader("val", config.data_dir, config.anchors_path, config.num_classes, input_shape = config.input_shape, max_boxes = config.max_boxes)
+    # image_files, bboxes_data, labels, labels_text, _, _ = val_Reader.read_annotations(config.data_dir, config.voc2007test_dir)
+    # print(image_files)
+    #
+    # with tf.Session() as sess:
+    #     if yolo_weights is not None:
+    #         with tf.variable_scope('predict'):
+    #             boxes, scores, classes = predictor.predict(input_image, input_image_shape, is_reuse=False)
+    #             print("qwert")
+    #         load_op = load_weights(tf.global_variables(scope = 'predict'), weights_file = yolo_weights)
+    #         sess.run(load_op)
+    #         print("ppppppppppppppppppp")
+    #     else:
+    #         saver = tf.train.Saver()
+    #         model_file = tf.train.latest_checkpoint(model_path)
+    #         saver.restore(sess, model_file)
+    #     for index in range(len(image_files)):
+    #         val_bboxes = []
+    #         image_file = image_files[index]
+    #         file_id = os.path.split(image_file)[-1].split('.')[0]
+    #         bid = 0
+    #         # print(bboxes_data[index])
+    #         # print(bboxes_data[index+1])
+    #         for bbox in bboxes_data:
+    #             # print(bbox)
+    #             left, top, right, bottom = bbox[0], bbox[1], bbox[2], bbox[3]
+    #
+    #             # class_id = labels[bid]
+    #             class_name = labels_text[bid]
+    #             bid += 1
+    #             bbox = [left, top, right, bottom]
+    #             val_bboxes.append({"class_name" : class_name, "bbox": bbox, "used": False})
+    #             gt_counter_per_class[class_name] += 1
+    #         ground_truth[file_id] = val_bboxes
+    #         image = Image.open(image_file)
+    #         resize_image = letterbox_image(image, (416, 416))
+    #         image_data = np.array(resize_image, dtype = np.float32)
+    #         image_data /= 255.
+    #         image_data = np.expand_dims(image_data, axis = 0)
+    #         print("ooooooooooooooo")
+    #         out_boxes, out_scores, out_classes = sess.run(
+    #             [boxes, scores, classes],
+    #             feed_dict = {
+    #                 input_image : image_data,
+    #                 input_image_shape : [image.size[1], image.size[0]]
+    #             })
+    #         # print(out_boxes)
+    #         print("detect {}/{} found boxes: {}".format(index, len(image_files), len(out_boxes)))
+    #         for o, c in enumerate(out_classes):
+    #             predicted_class = val_Reader.class_names[c]
+    #             # print(c)
+    #             box = out_boxes[o]
+    #             score = out_scores[o]
+    #
+    #             top, left, bottom, right = box
+    #             # print(box)
+    #             top = max(0, np.floor(top + 0.5).astype('int32'))
+    #             # print(top)
+    #             left = max(0, np.floor(left + 0.5).astype('int32'))
+    #             # print(left)
+    #             bottom = min(image.size[1], np.floor(bottom + 0.5).astype('int32'))
+    #             # print(bottom)
+    #             right = min(image.size[0], np.floor(right + 0.5).astype('int32'))
+    #             # print(right)
+    #
+    #             bbox = [left, top, right, bottom]
+    #             # print(bbox)
+    #             class_pred[predicted_class].append({"confidence": str(score), "file_id": file_id, "bbox": bbox})
+    #             # print(predicted_class)
+    #             # print(class_pred['dog'])
+    #
+    # # 计算每个类别的AP
+    # sum_AP = 0.0
+    # count_true_positives = {}
+    # for class_index, class_name in enumerate(sorted(gt_counter_per_class.keys())):
+    #     # print(gt_counter_per_class.keys())
+    #     # print(class_name)
+    #     class_name = class_name.decode('utf-8')
+    #     print(class_name)
+    #
+    #     count_true_positives[class_name] = 0
+    #     predictions_data = class_pred[class_name]
+    #     # predictions_data = class_pred['train']
+    #     # print(predictions_data)
+    #     # 该类别总共有多少个box
+    #     nd = len(predictions_data)
+    #     # print(nd)
+    #     tp = [0] * nd  # true positive
+    #     fp = [0] * nd  # false positive
+    #     for idx, prediction in enumerate(predictions_data):
+    #         file_id = prediction['file_id']
+    #         ground_truth_data = ground_truth[file_id]
+    #         # print(ground_truth_data)
+    #         bbox_pred = prediction['bbox']
+    #         print(bbox_pred)
+    #         Iou_max = -1
+    #         gt_match = None
+    #         for obj in ground_truth_data:
+    #             if obj['class_name'].decode('utf-8') == class_name:
+    #                 # print(obj['class_name'].decode('utf-8'))
+    #                 bbox_gt = obj['bbox']
+    #                 print(bbox_gt)
+    #                 bbox_intersect = [max(bbox_pred[0], bbox_gt[0]), max(bbox_gt[1], bbox_pred[1]), min(bbox_gt[2], bbox_pred[2]), min(bbox_gt[3], bbox_pred[3])]
+    #                 # print(bbox_intersect)
+    #                 intersect_weight = bbox_intersect[2] - bbox_intersect[0] + 1
+    #                 # print(intersect_weight)
+    #                 intersect_high = bbox_intersect[3] - bbox_intersect[1] + 1
+    #                 if intersect_high > 0 and intersect_weight > 0:
+    #                     union_area = (bbox_pred[2] - bbox_pred[0] + 1) * (bbox_pred[3] - bbox_pred[1] + 1) + (bbox_gt[2] - bbox_gt[0] + 1) * (bbox_gt[3] - bbox_gt[1] + 1) - intersect_weight * intersect_high
+    #                     Iou = intersect_high * intersect_weight / union_area
+    #                     if Iou > Iou_max:
+    #                         Iou_max = Iou
+    #                         gt_match = obj
+    #         if Iou_max > min_Iou:
+    #             if not gt_match['used'] and gt_match is not None:
+    #                 tp[idx] = 1
+    #                 gt_match['used'] = True
+    #             else:
+    #                 fp[idx] = 1
+    #         else:
+    #             fp[idx] = 1
+    #     # 计算精度和召回率
+    #     sum_class = 0
+    #     for idx, val in enumerate(fp):
+    #         fp[idx] += sum_class
+    #         sum_class += val
+    #     sum_class = 0
+    #     for idx, val in enumerate(tp):
+    #         tp[idx] += sum_class
+    #         sum_class += val
+    #     rec = tp[:]
+    #     for idx, val in enumerate(tp):
+    #         rec[idx] = tp[idx] / gt_counter_per_class[class_name]
+    #     prec = tp[:]
+    #     for idx, val in enumerate(tp):
+    #         prec[idx] = tp[idx] / (fp[idx] + tp[idx])
+    #
+    #     ap, mrec, mprec = voc_ap(rec, prec)
+    #     sum_AP += ap
+    # MAP = sum_AP / len(gt_counter_per_class) * 100
+    # print("The Model Eval MAP: {}".format(MAP))
+
 if __name__ == "__main__":
     train()
     # 计算模型的Map
     # eval(config.model_dir, yolo_weights = config.yolo3_weights_path)
+    # eval(config.model_dir, yolo_weights=None)
+
 

@@ -80,7 +80,7 @@ class yolo_predictor:
         box_scores = []
         input_shape = tf.shape(yolo_outputs[0])[1 : 3] * 32
         # 对三个尺度的输出获取每个预测box坐标和box的分数，score计算为置信度x类别概率
-        for i in range(len(yolo_outputs)):
+        for i in range(len(yolo_outputs)-1):
             _boxes, _box_scores = self.boxes_and_scores(yolo_outputs[i], self.anchors[anchor_mask[i]], len(self.class_names), input_shape, image_shape)
             boxes.append(_boxes)
             box_scores.append(_box_scores)
@@ -204,7 +204,7 @@ class yolo_predictor:
         return box_xy, box_wh, box_confidence, box_class_probs
 
 
-    def predict(self, inputs, image_shape):
+    def predict(self, inputs, image_shape, is_reuse):
         """
         Introduction
         ------------
@@ -220,6 +220,6 @@ class yolo_predictor:
             classes: 物体类别
         """
         model = yolo(config.norm_epsilon, config.norm_decay, self.anchors_path, self.classes_path, pre_train = False)
-        output = model.yolo_inference(inputs, config.num_anchors // 3, config.num_classes, training = False)
-        boxes, scores, classes = self.eval(output, image_shape, max_boxes = 20)
+        output = model.yolo_inference(inputs, config.num_anchors // 3, config.num_classes, reuse=is_reuse, training=False)
+        boxes, scores, classes = self.eval(output, image_shape, max_boxes=20)
         return boxes, scores, classes

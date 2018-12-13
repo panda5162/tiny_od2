@@ -10,32 +10,41 @@ norm_decay = 0.99
 norm_epsilon = 1e-3
 pre_train = True
 num_anchors = 9
-num_classes = 20
+num_classes = 80
 training = True
 ignore_thresh = .5
 learning_rate = 0.001
-train_batch_size = 32
-val_batch_size = 10
-train_num = 16658
-val_num = 2277
-Epoch = 20
+train_batch_size = 64
+val_batch_size = 128
+train_num = 118287
+val_num = 5000
+# Epoch = 9
+Epoch = 50
 obj_threshold = 0.3
 nms_threshold = 0.5
 gpu_index = "0"
-log_dir = './logs'
+# log_dir = './logs'
+log_dir = './logs/logs-7'
+
 data_dir = './model_data'
-model_dir = './test_model/model.ckpt-192192'
+voc_dir = 'VOCROOT'
+voc2007_dir = 'VOCROOT/VOC2007'
+voc2007test_dir = 'VOCROOT/VOC2007TEST'
+voc2012_dir = 'VOCROOT/VOC2012'
+
+model_dir = './test_model/model.ckpt-7'
 pre_train_yolo3 = False
 yolo3_weights_path = './model_data/yolov3.weights'
 darknet53_weights_path = './model_data/darknet53.weights'
 anchors_path = './model_data/yolo_anchors.txt'
-classes_path = './model_data/voc_classes.txt'
-# train_data_file = '/data0/dataset/coco/train2017'
-# val_data_file = '/data0/dataset/coco/val2017'
-# train_annotations_file = '/data0/gaochen3/tensorflow-yolo3/annotations/instances_train2017.json'
-# val_annotations_file = '/data0/gaochen3/tensorflow-yolo3/annotations/instances_val2017.json'
+classes_path = './model_data/coco_classes.txt'
+train_data_file = './dataset/coco/train2017'
+val_data_file = './dataset/coco/val2017'
+train_annotations_file = './dataset/annotations/instances_train2017.json'
+val_annotations_file = './dataset/annotations/instances_val2017.json'
 
 
 beta1 = 0.9
 alpha = 0.001
 beta = 0.01
+

@@ -4,9 +4,13 @@ import json
 import tensorflow as tf
 import numpy as np
 from collections import defaultdict
+slim = tf.contrib.slim
+import xml.etree.ElementTree as xml_tree
+import model_data.dataset_common
+import glob
 
 class Reader:
-    def __init__(self, mode, data_dir, anchors_path, num_classes, tfrecord_num = 12, input_shape = 416, max_boxes = 20):
+    def __init__(self, mode, data_dir, anchors_path, num_classes, input_shape = 96, max_boxes = 20):
         """
         Introduction
         ------------
@@ -20,25 +24,105 @@ class Reader:
             input_shape: 图像输入模型的大小
             max_boxes: 每张图片最大的box数量
             jitter: 随机长宽比系数
-            hue: 调整hsv颜色空间系数
-            sat: 调整饱和度系数
-            cont: 调整对比度系数
-            bri: 调整亮度系数
         """
         self.data_dir = data_dir
         self.input_shape = input_shape
         self.max_boxes = max_boxes
         self.mode = mode
-        self.annotations_file = {'train' : config.train_annotations_file, 'val' : config.val_annotations_file}
-        self.data_file = {'train': config.train_data_file, 'val': config.val_data_file}
         self.anchors_path = anchors_path
         self.anchors = self._get_anchors()
         self.num_classes = num_classes
-        file_pattern = self.data_dir + "/*" + self.mode + '.tfrecords'
+        file_pattern = self.data_dir + "/tfrecords1/" + self.mode + "-*"  + '-of-00016'
         self.TfrecordFile = tf.gfile.Glob(file_pattern)
         self.class_names = self._get_class(config.classes_path)
-        if len(self.TfrecordFile) == 0:
-            self.convert_to_tfrecord(self.data_dir, tfrecord_num)
+
+        # if len(self.TfrecordFile) == 0:
+        #     self.convert_to_tfrecord(self.data_dir, tfrecord_num)
+
+    def read_annotations(self, directory, vocdir):
+        """Find the bounding boxes for a given image file.
+
+        Args:
+          directory: string; the path of all datas.
+          cur_record: list of strings; the first of which is the sub-directory of cur_record, the second is the image filename.
+        Returns:
+          bboxes: List of bounding boxes for each image.
+          labels: List of labels for bounding box.
+          labels_text: List of labels' name for bounding box.
+          difficult: List of ints indicate the difficulty of that bounding box.
+          truncated: List of ints indicate the truncation of that bounding box.
+        """
+        # allxml = glob.glob(directory + '/' + vocdir + '/Annotations/*.xml')
+        allxml = glob.glob(directory + '/' + vocdir + '/Annotations/000003.xml')
+        bboxes = []
+        labels = []
+        labels_text = []
+        difficult = []
+        truncated = []
+        file = []
+
+        for onexml in allxml:
+            anna_file = onexml
+
+            tree = xml_tree.parse(anna_file)
+            root = tree.getroot()
+
+            # Image shape.
+            size = root.find('size')
+            filename = root.find('filename').text
+            shape = [int(size.find('height').text),
+                     int(size.find('width').text),
+                     int(size.find('depth').text)]
+            # Find annotations.
+            for obj in root.findall('object'):
+                label = obj.find('name').text
+                labels.append(int(model_data.dataset_common.VOC_LABELS[label][0]))
+                labels_text.append(label.encode('ascii'))
+
+                isdifficult = obj.find('difficult')
+                if isdifficult is not None:
+                    difficult.append(int(isdifficult.text))
+                else:
+                    difficult.append(0)
+
+                istruncated = obj.find('truncated')
+                if istruncated is not None:
+                    truncated.append(int(istruncated.text))
+                else:
+                    truncated.append(0)
+
+                bbox = obj.find('bndbox')
+
+                # bboxes.append(np.array([float(bbox.find('xmin').text) / shape[1],
+                #                         float(bbox.find('ymin').text) / shape[0],
+                #                         float(bbox.find('xmax').text) / shape[1],
+                #                         float(bbox.find('ymax').text) / shape[0]
+                #                        ]))
+                bboxes.append(np.array([float(bbox.find('xmin').text),
+                                        float(bbox.find('ymin').text),
+                                        float(bbox.find('xmax').text),
+                                        float(bbox.find('ymax').text)
+                                        ]))
+
+                file.append(os.path.join(directory, vocdir, 'JPEGImages', filename))
+
+        return file, bboxes, labels, labels_text, difficult, truncated
+
+
+    def _get_class(self, classes_path):
+        """
+        Introduction
+        ------------
+            获取类别名字
+        Returns
+        -------
+            class_names: voc数据集类别对应的名字
+        """
+        classes_path = os.path.expanduser(classes_path)
+        with open(classes_path) as f:
+            class_names = f.readlines()
+        class_names = [c.strip() for c in class_names]
+        return class_names
 
     def _get_anchors(self):
         """
@@ -55,20 +139,6 @@ class Reader:
         anchors = [float(x) for x in anchors.split(',')]
         return np.array(anchors).reshape(-1, 2)
 
-    def _get_class(self, classes_path):
-        """
-        Introduction
-        ------------
-            获取类别名字
-        Returns
-        -------
-            class_names: coco数据集类别对应的名字
-        """
-        classes_path = os.path.expanduser(classes_path)
-        with open(classes_path) as f:
-            class_names = f.readlines()
-        class_names = [c.strip() for c in class_names]
-        return class_names
 
     def Preprocess_true_boxes(self, true_boxes):
         """
@@ -113,7 +183,7 @@ class Reader:
         iou = intersect_area / (box_area + anchor_area - intersect_area)
 
         # 找出和ground truth box的iou最大的anchor box, 然后将对应不同比例的负责该ground turth box 的位置置为ground truth box坐标
-        best_anchor = np.argmax(iou, axis = -1)
+        best_anchor = np.argmax(iou, axis=-1)
         for t, n in enumerate(best_anchor):
             for l in range(num_layers):
                 if n in anchor_mask[l]:
@@ -123,137 +193,9 @@ class Reader:
                     c = true_boxes[t, 4].astype('int32')
                     y_true[l][j, i, k, 0:4] = true_boxes[t, 0:4]
                     y_true[l][j, i, k, 4] = 1.
-                    y_true[l][j, i, k, 5 + c] = 1.
+                    y_true[l][j, i, k, 4 + c] = 1.
         return y_true[0], y_true[1], y_true[2]
 
-
-
-    def read_annotations(self):
-        """
-        Introduction
-        ------------
-            读取COCO数据集图片路径和对应的标注
-        Parameters
-        ----------
-            data_file: 文件路径
-        """
-        image_data = []
-        boxes_data = []
-        name_box_id = defaultdict(list)
-        with open(self.annotations_file[self.mode], encoding='utf-8') as file:
-            data = json.load(file)
-            annotations = data['annotations']
-            for ant in annotations:
-                id = ant['image_id']
-                name = os.path.join(self.data_file[self.mode], '%012d.jpg' % id)
-                cat = ant['category_id']
-                if cat >= 1 and cat <= 11:
-                    cat = cat - 1
-                elif cat >= 13 and cat <= 25:
-                    cat = cat - 2
-                elif cat >= 27 and cat <= 28:
-                    cat = cat - 3
-                elif cat >= 31 and cat <= 44:
-                    cat = cat - 5
-                elif cat >= 46 and cat <= 65:
-                    cat = cat - 6
-                elif cat == 67:
-                    cat = cat - 7
-                elif cat == 70:
-                    cat = cat - 9
-                elif cat >= 72 and cat <= 82:
-                    cat = cat - 10
-                elif cat >= 84 and cat <= 90:
-                    cat = cat - 11
-                name_box_id[name].append([ant['bbox'], cat])
-
-            for key in name_box_id.keys():
-                boxes = []
-                image_data.append(key)
-                box_infos = name_box_id[key]
-                for info in box_infos:
-                    x_min = info[0][0]
-                    y_min = info[0][1]
-                    x_max = x_min + info[0][2]
-                    y_max = y_min + info[0][3]
-                    boxes.append(np.array([x_min, y_min, x_max, y_max, info[1]]))
-                boxes_data.append(np.array(boxes))
-
-        return image_data, boxes_data
-
-
-    def convert_to_tfrecord(self, tfrecord_path, num_tfrecords):
-        """
-        Introduction
-        ------------
-            将图片和boxes数据存储为tfRecord
-        Parameters
-        ----------
-            tfrecord_path: tfrecord文件存储路径
-            num_tfrecords: 分成多少个tfrecord
-        """
-        image_data, boxes_data = self.read_annotations()
-        images_num = int(len(image_data) / num_tfrecords)
-        for index_records in range(num_tfrecords):
-            output_file = os.path.join(tfrecord_path, str(index_records) + '_' + self.mode + '.tfrecords')
-            with tf.python_io.TFRecordWriter(output_file) as record_writer:
-                for index in range(index_records * images_num, (index_records + 1) * images_num):
-                    with tf.gfile.FastGFile(image_data[index], 'rb') as file:
-                        image = file.read()
-                        xmin, xmax, ymin, ymax, label = [], [], [], [], []
-                        for box in boxes_data[index]:
-                            xmin.append(box[0])
-                            ymin.append(box[1])
-                            xmax.append(box[2])
-                            ymax.append(box[3])
-                            label.append(box[4])
-                        example = tf.train.Example(features = tf.train.Features(
-                            feature = {
-                                'image/encoded' : tf.train.Feature(bytes_list = tf.train.BytesList(value = [image])),
-                                'image/object/bbox/xmin' : tf.train.Feature(float_list = tf.train.FloatList(value = xmin)),
-                                'image/object/bbox/xmax': tf.train.Feature(float_list = tf.train.FloatList(value = xmax)),
-                                'image/object/bbox/ymin': tf.train.Feature(float_list = tf.train.FloatList(value = ymin)),
-                                'image/object/bbox/ymax': tf.train.Feature(float_list = tf.train.FloatList(value = ymax)),
-                                'image/object/bbox/label': tf.train.Feature(float_list = tf.train.FloatList(value = label)),
-                            }
-                        ))
-                        record_writer.write(example.SerializeToString())
-                        if index % 1000 == 0:
-                            print('Processed {} of {} images'.format(index + 1, len(image_data)))
-
-
-    def parser(self, serialized_example):
-        """
-        Introduction
-        ------------
-            解析tfRecord数据
-        Parameters
-        ----------
-            serialized_example: 序列化的每条数据
-        """
-        features = tf.parse_single_example(
-            serialized_example,
-            features = {
-                'image/encoded' : tf.FixedLenFeature([], dtype = tf.string),
-                'image/object/bbox/xmin' : tf.VarLenFeature(dtype = tf.float32),
-                'image/object/bbox/xmax': tf.VarLenFeature(dtype = tf.float32),
-                'image/object/bbox/ymin': tf.VarLenFeature(dtype = tf.float32),
-                'image/object/bbox/ymax': tf.VarLenFeature(dtype = tf.float32),
-                'image/object/bbox/label': tf.VarLenFeature(dtype = tf.float32)
-            }
-        )
-        image = tf.image.decode_jpeg(features['image/encoded'], channels = 3)
-        image = tf.image.convert_image_dtype(image, tf.uint8)
-        xmin = tf.expand_dims(features['image/object/bbox/xmin'].values, axis = 0)
-        ymin = tf.expand_dims(features['image/object/bbox/ymin'].values, axis = 0)
-        xmax = tf.expand_dims(features['image/object/bbox/xmax'].values, axis = 0)
-        ymax = tf.expand_dims(features['image/object/bbox/ymax'].values, axis = 0)
-        label = tf.expand_dims(features['image/object/bbox/label'].values, axis = 0)
-        bbox = tf.concat(axis = 0, values = [xmin, ymin, xmax, ymax, label])
-        bbox = tf.transpose(bbox, [1, 0])
-        image, bbox = self.Preprocess(image, bbox)
-        bbox_true_13, bbox_true_26, bbox_true_52 = tf.py_func(self.Preprocess_true_boxes, [bbox], [tf.float32, tf.float32, tf.float32])
-        return image, bbox, bbox_true_13, bbox_true_26, bbox_true_52
 
     def Preprocess(self, image, bbox):
         """
@@ -305,6 +247,43 @@ class Reader:
         return image, bbox
 
 
+    def slim_get_split(self, serialized_example):
+
+        """""
+               Introduction
+               ------------
+                   解析tfRecord数据
+               Parameters
+               ----------
+                   serialized_example: 序列化的每条数据
+               """
+        features = tf.parse_single_example(
+            serialized_example,
+            features={
+                'image/encoded': tf.FixedLenFeature([], dtype=tf.string),
+                'image/object/bbox/xmin': tf.VarLenFeature(dtype=tf.float32),
+                'image/object/bbox/xmax': tf.VarLenFeature(dtype=tf.float32),
+                'image/object/bbox/ymin': tf.VarLenFeature(dtype=tf.float32),
+                'image/object/bbox/ymax': tf.VarLenFeature(dtype=tf.float32),
+                'image/object/bbox/label': tf.VarLenFeature(dtype=tf.float32)
+            }
+        )
+        image = tf.image.decode_jpeg(features['image/encoded'], channels=3)
+        image = tf.image.convert_image_dtype(image, tf.uint8)
+        xmin = tf.expand_dims(features['image/object/bbox/xmin'].values, axis=0)
+        ymin = tf.expand_dims(features['image/object/bbox/ymin'].values, axis=0)
+        xmax = tf.expand_dims(features['image/object/bbox/xmax'].values, axis=0)
+        ymax = tf.expand_dims(features['image/object/bbox/ymax'].values, axis=0)
+        label = tf.expand_dims(features['image/object/bbox/label'].values, axis=0)
+        bbox = tf.concat(axis=0, values=[xmin, ymin, xmax, ymax, label])
+        bbox = tf.transpose(bbox, [1, 0])
+        image, bbox = self.Preprocess(image, bbox)
+        bbox_true_13, bbox_true_26, bbox_true_52 = tf.py_func(self.Preprocess_true_boxes, [bbox],
+                                                              [tf.float32, tf.float32, tf.float32])
+        return image, bbox, bbox_true_13, bbox_true_26, bbox_true_52
+
+
+
     def build_dataset(self, batch_size):
         """
         Introduction
@@ -317,8 +296,8 @@ class Reader:
         ------
             dataset: 返回tensorflow的dataset
         """
-        dataset = tf.data.TFRecordDataset(filenames = self.TfrecordFile)
-        dataset = dataset.map(self.parser, num_parallel_calls = 10)
+        dataset = tf.data.TFRecordDataset(filenames=self.TfrecordFile)
+        dataset = dataset.map(self.slim_get_split, num_parallel_calls=10)
         if self.mode == 'train':
             dataset = dataset.repeat().shuffle(9000).batch(batch_size).prefetch(batch_size)
         else:

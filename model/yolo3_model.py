@@ -29,6 +29,8 @@ class yolo:
         self.pre_train = pre_train
         self.anchors = self._get_anchors()
         self.classes = self._get_class()
+
+
     def GAN_g1(self, t_image, is_train=False, reuse=False):
         w_init = tf.random_normal_initializer(stddev=0.02)
         b_init = None  # tf.constant_initializer(value=0.0)
@@ -476,7 +478,8 @@ class yolo:
         d_loss2 = 0
 
         anchor_mask = [[6, 7, 8], [3, 4, 5], [0, 1, 2]]
-        input_shape = [416.0, 416.0]
+        # input_shape = [416.0, 416.0]
+        input_shape = [96.0, 96.0]
         grid_shapes = [tf.cast(tf.shape(yolo_output[l])[1:3], tf.float32) for l in range(3)]
         for index in range(3):
             # 只有负责预测ground truth box的grid对应的为1, 才计算相对应的loss
