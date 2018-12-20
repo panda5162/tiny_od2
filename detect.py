@@ -9,7 +9,7 @@ from utils import letterbox_image, load_weights
 
 # 指定使用GPU的Index
 # os.environ["CUDA_VISIBLE_DEVICES"] = config.gpu_index
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 
 def detect(image_path, model_path, yolo_weights = None):
@@ -40,7 +40,6 @@ def detect(image_path, model_path, yolo_weights = None):
         else:
             saver = tf.train.Saver()
             model_file = tf.train.latest_checkpoint(model_path)
-
             saver.restore(sess, model_file)
         out_boxes, out_scores, out_classes = sess.run(
             [boxes, scores, classes],
@@ -66,6 +65,12 @@ def detect(image_path, model_path, yolo_weights = None):
             left = max(0, np.floor(left + 0.5).astype('int32'))
             bottom = min(image.size[1], np.floor(bottom + 0.5).astype('int32'))
             right = min(image.size[0], np.floor(right + 0.5).astype('int32'))
+
+            data = str(label) + "," + str(left) + "." + str(top) + "," + str(right) + "," + str(bottom) + "\n"
+
+            with open('./res/data.txt', "a") as f:
+                f.write(data)
+
             print(label, (left, top), (right, bottom))
 
             if top - label_size[1] >= 0:
@@ -84,7 +89,7 @@ def detect(image_path, model_path, yolo_weights = None):
             draw.text(text_origin, label, fill=(0, 0, 0), font=font)
             del draw
         image.show()
-        image.save('./result1.jpg')
+        image.save('./res/1.jpg')
 
 if __name__ == '__main__':
     # parser = argparse.ArgumentParser(argument_default = argparse.SUPPRESS)
@@ -93,6 +98,6 @@ if __name__ == '__main__':
     # )
     # FLAGS = parser.parse_args()
     if config.pre_train_yolo3 == True:
-        detect('./model_data/1.jpg', config.model_dir, config.yolo3_weights_path)
+        detect('./model_data/000000000036.jpg', config.model_dir, config.yolo3_weights_path)
     else:
-        detect('./model_data/1.jpg', config.model_dir)
+        detect('./model_data/000000000036.jpg', config.model_dir)

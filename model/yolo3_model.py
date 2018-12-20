@@ -7,6 +7,14 @@ import numpy as np
 import tensorflow as tf
 import os
 from tensorlayer.layers import *
+from PIL import Image
+import sys
+sys.path.append("..")
+import config
+import utils
+import cv2
+import scipy.misc
+
 
 class yolo:
     def __init__(self, norm_epsilon, norm_decay, anchors_path, classes_path, pre_train):
@@ -30,70 +38,63 @@ class yolo:
         self.anchors = self._get_anchors()
         self.classes = self._get_class()
 
-
     def GAN_g1(self, t_image, is_train=False, reuse=False):
-        w_init = tf.random_normal_initializer(stddev=0.02)
-        b_init = None  # tf.constant_initializer(value=0.0)
-        g_init = tf.random_normal_initializer(1., 0.02)
+        # if reuse:
+        #     tf.get_variable_scope().reuse_variables()
+        with tf.variable_scope("generator1", reuse=reuse):
+            w_init = tf.random_normal_initializer(stddev=0.02)
+            b_init = None  # tf.constant_initializer(value=0.0)
+            g_init = tf.random_normal_initializer(1., 0.02)
 
-        with tf.variable_scope("GAN_g1", reuse=reuse) as vs:
-            n = InputLayer(t_image, name='in')
-            n = Conv2d(n, 64, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, name='n64s1/c')
-            temp = n
-
+            n = InputLayer(t_image, name='g1_in')
+            n = Conv2d(n, 64, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, name='g1_n64s1/c')
             for i in range(8):
-                nn = Conv2d(n, 64, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, b_init=b_init,
-                            name='n64s1/c1/%s' % i)
-                nn = BatchNormLayer(nn, act=tf.nn.relu, is_train=is_train, gamma_init=g_init, name='n64s1/b1/%s' % i)
-                nn = Conv2d(nn, 64, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, b_init=b_init,
-                            name='n64s1/c2/%s' % i)
-                nn = BatchNormLayer(nn, is_train=is_train, gamma_init=g_init, name='n64s1/b2/%s' % i)
-                nn = ElementwiseLayer([n, nn], tf.add, name='b_residual_add/%s' % i)
+                nn = Conv2d(n, 64, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, b_init=b_init, name='g1_n64s1/c1/%s' % i)
+                nn = BatchNormLayer(nn, act=tf.nn.relu, is_train=is_train, gamma_init=g_init, name='g1_n64s1/b1/%s' % i)
+                nn = Conv2d(nn, 64, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, b_init=b_init, name='g1_n64s1/c2/%s' % i)
+                nn = BatchNormLayer(nn, is_train=is_train, gamma_init=g_init, name='g1_n64s1/b2/%s' % i)
+                nn = ElementwiseLayer([n, nn], tf.add, name='g1_b_residual_add/%s' % i)
                 n = nn
-
-            n = Conv2d(n, 64, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, b_init=b_init, name='n64s1/c/m')
-            n = DeConv2d(n, 256, (3, 3), (2, 2), act=None, padding='SAME', W_init=w_init, b_init=b_init,
-                         name='n256s2/dc/m')
-            n = DeConv2d(n, 256, (3, 3), (2, 2), act=None, padding='SAME', W_init=w_init, b_init=b_init,
-                         name='n256s3/dc/m')
-            n = Conv2d(n, 3, (1, 1), (1, 1), act=None, padding='SAME', W_init=w_init, name='n3s1/c')
-
-            return (n)
+            n = Conv2d(n, 64, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, b_init=b_init, name='g1_n64s1/c/m')
+            n = DeConv2d(n, 256, (3, 3), (2, 2), act=None, padding='SAME', W_init=w_init, b_init=b_init, name='g1_n256s2/dc/m')
+            n = DeConv2d(n, 256, (3, 3), (2, 2), act=None, padding='SAME', W_init=w_init, b_init=b_init, name='g1_n256s3/dc/m')
+            n = Conv2d(n, 3, (1, 1), (1, 1), act=None, padding='SAME', W_init=w_init, name='g1_n3s1/c')
+            # tf.summary.image('GAN_g1', n, max_outputs=3)
+            return n
 
     def GAN_g2(self, t_image, is_train=False, reuse=False):
-        w_init = tf.random_normal_initializer(stddev=0.02)
-        b_init = None  # tf.constant_initializer(value=0.0)
-        g_init = tf.random_normal_initializer(1., 0.02)
+        with tf.variable_scope("generator2", reuse=reuse):
+            w_init = tf.random_normal_initializer(stddev=0.02)
+            b_init = None  # tf.constant_initializer(value=0.0)
+            g_init = tf.random_normal_initializer(1., 0.02)
 
-        with tf.variable_scope("GAN_g2", reuse=reuse) as vs:
-            # n = InputLayer(t_image, name='in')
-            n = Conv2d(t_image, 64, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, name='n64s1/c')
-            temp = n
-
+            n = InputLayer(t_image, name='g2_in')
+            n = Conv2d(n, 64, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, name='g2_n64s1/c')
             for i in range(8):
-                nn = Conv2d(n, 64, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, b_init=b_init,
-                            name='n64s1/c1/%s' % i)
-                nn = BatchNormLayer(nn, act=tf.nn.relu, is_train=is_train, gamma_init=g_init, name='n64s1/b1/%s' % i)
-                nn = Conv2d(nn, 64, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, b_init=b_init,
-                            name='n64s1/c2/%s' % i)
-                nn = BatchNormLayer(nn, is_train=is_train, gamma_init=g_init, name='n64s1/b2/%s' % i)
-                nn = ElementwiseLayer([n, nn], tf.add, name='b_residual_add/%s' % i)
+                nn = Conv2d(n, 64, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, b_init=b_init, name='g2_n64s1/c1/%s' % i)
+                nn = BatchNormLayer(nn, act=tf.nn.relu, is_train=is_train, gamma_init=g_init, name='g2_n64s1/b1/%s' % i)
+                nn = Conv2d(nn, 64, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, b_init=b_init, name='g2_n64s1/c2/%s' % i)
+                nn = BatchNormLayer(nn, is_train=is_train, gamma_init=g_init, name='g2_n64s1/b2/%s' % i)
+                nn = ElementwiseLayer([n, nn], tf.add, name='g2_b_residual_add/%s' % i)
                 n = nn
-
-            n = Conv2d(n, 64, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, b_init=b_init, name='n64s1/c/m')
-            n = Conv2d(n, 256, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, b_init=b_init,
-                       name='n256s1/c/m')
-            n = Conv2d(n, 256, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, b_init=b_init,
-                       name='n256s1/c/m')
-            n = Conv2d(n, 3, (1, 1), (1, 1), act=None, padding='SAME', W_init=w_init, name='n3s1/c')
-            return (n)
-
-
-    def GAN_g(self, t_image, is_train=False, reuse=False):
-        with tf.variable_scope("GAN_g", reuse=reuse) as vs:
-            n = self.GAN_g1(t_image, is_train, reuse)
-            n = self.GAN_g2(n, is_train, reuse)
+            n = Conv2d(n, 64, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, b_init=b_init, name='g2_n64s1/c/m')
+            n = Conv2d(n, 256, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, b_init=b_init, name='g2_n256s1/c/m')
+            n = Conv2d(n, 256, (3, 3), (1, 1), act=None, padding='SAME', W_init=w_init, b_init=b_init, name='g2_n256s1/c/m')
+            n = Conv2d(n, 3, (1, 1), (1, 1), act=None, padding='SAME', W_init=w_init, name='g2_n3s1/c')
             return n
+
+    def GAN_g(self, t_image, is_train=False, reuse=False, mask=False):
+        with tf.variable_scope("generator"):
+            print(tf.get_variable_scope().name)
+            n = self.GAN_g1(t_image, is_train, reuse=reuse)
+            # gan_g.reuse_variables()
+            if mask:
+                n = self.GAN_g2(n.outputs, is_train, reuse=False)
+                # for ele1 in tf.trainable_variables():
+                #     print(ele1.name)
+                return n
+        # self.g_variables = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='generator')
+        return n
 
     def _get_class(self):
         """
@@ -122,9 +123,7 @@ class yolo:
         anchors = [float(x) for x in anchors.split(',')]
         return np.array(anchors).reshape(-1, 2)
 
-
-
-    def _batch_normalization_layer(self, input_layer, name = None, training = True, norm_decay = 0.99, norm_epsilon = 1e-3):
+    def _batch_normalization_layer(self, input_layer, name=None, training=True, norm_decay=0.99, norm_epsilon=1e-3):
         '''
         Introduction
         ------------
@@ -145,8 +144,7 @@ class yolo:
             scale = True, training = training, name = name)
         return tf.nn.leaky_relu(bn_layer, alpha = 0.1)
 
-
-    def _conv2d_layer(self, inputs, filters_num, kernel_size, name, use_bias = False, strides = 1):
+    def _conv2d_layer(self, inputs, filters_num, kernel_size, name, use_bias=False, strides=1):
         """
         Introduction
         ------------
@@ -172,6 +170,7 @@ class yolo:
             inputs = inputs, filters = filters_num,
             kernel_size = kernel_size, strides = [strides, strides], kernel_initializer = tf.glorot_uniform_initializer(),
             padding = ('SAME' if strides == 1 else 'VALID'), kernel_regularizer = tf.contrib.layers.l2_regularizer(scale = 5e-4), use_bias = use_bias, name = name)
+        # tf.summary.image('_conv2d_layer', conv, max_outputs=3)
         return conv
 
 
@@ -195,7 +194,9 @@ class yolo:
             inputs: 经过残差网络处理后的结果
         """
         # 在输入feature map的长宽维度进行padding
+
         inputs = tf.pad(inputs, paddings=[[0, 0], [1, 0], [1, 0], [0, 0]], mode='CONSTANT')
+
         layer = self._conv2d_layer(inputs, filters_num, kernel_size = 3, strides = 2, name = "conv2d_" + str(conv_index))
         layer = self._batch_normalization_layer(layer, name = "batch_normalization_" + str(conv_index), training = training, norm_decay = norm_decay, norm_epsilon = norm_epsilon)
         conv_index += 1
@@ -242,6 +243,7 @@ class yolo:
             conv, conv_index = self._Residual_block(conv, conv_index = conv_index, filters_num = 512, blocks_num = 8, training = training, norm_decay = norm_decay, norm_epsilon = norm_epsilon)
             route2 = conv
             conv, conv_index = self._Residual_block(conv, conv_index = conv_index,  filters_num = 1024, blocks_num = 4, training = training, norm_decay = norm_decay, norm_epsilon = norm_epsilon)
+
         return  route1, route2, conv, conv_index
 
 
@@ -289,7 +291,9 @@ class yolo:
         return route, conv, conv_index
 
 
-    def yolo_inference(self, inputs, num_anchors, num_classes, reuse, training):
+    # def yolo_inference(self, inputs, num_anchors, num_classes, reuse, training):
+    def yolo_inference(self, inputs, num_anchors, num_classes, training):
+
         """
         Introduction
         ------------
@@ -301,12 +305,12 @@ class yolo:
             num_classes: 类别数量
             training: 是否为训练模式
         """
-        with tf.variable_scope("yolo_inference", reuse=reuse):
+        with tf.variable_scope("yolo_inference"):
             conv_index = 1
             conv2d_26, conv2d_43, conv, conv_index = self._darknet53(inputs, conv_index, training=training,
                                                                      norm_decay=self.norm_decay,
                                                                      norm_epsilon=self.norm_epsilon)
-            with tf.variable_scope('yolo'):
+            with tf.variable_scope('discriminator'):
                 out1 = self._conv2d_layer(conv, filters_num=2, kernel_size=1, strides=1, name="out1")  # HR/SR
 
                 conv2d_57, conv2d_59, conv_index = self._yolo_block(conv, 512, num_anchors * (num_classes + 5),
@@ -340,7 +344,8 @@ class yolo:
                 _, conv2d_75, _ = self._yolo_block(route1, 128, num_anchors * (num_classes + 5), conv_index=conv_index,
                                                    training=training, norm_decay=self.norm_decay,
                                                    norm_epsilon=self.norm_epsilon)
-
+            # for ele1 in tf.trainable_variables():
+            #     print(ele1.name)
             return [conv2d_59, conv2d_67, conv2d_75, out1]
 
 
@@ -518,14 +523,64 @@ class yolo:
             class_loss = tf.reduce_sum(class_loss) / tf.cast(tf.shape(yolo_output[0])[0], tf.float32)
 
             d_loss1 += xy_loss + wh_loss + confidence_loss + class_loss
+
         if tf_mask == 1:
-            d_loss2 = tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.ones_like(yolo_output[3]),
-                                                              logits=yolo_output[3])
+            d_loss2 = tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.ones_like(yolo_output[3]), logits=yolo_output[3])
             d_loss2 = tf.reduce_sum(d_loss2) / tf.cast(tf.shape(yolo_output[3])[0], tf.float32)
         if tf_mask == 0:
-            d_loss2 = tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.zeros_like(yolo_output[3]),
-                                                              logits=yolo_output[3])
+            d_loss2 = tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.zeros_like(yolo_output[3]), logits=yolo_output[3])
             d_loss2 = tf.reduce_sum(d_loss2) / tf.cast(tf.shape(yolo_output[3])[0], tf.float32)
         d_loss = d_loss2 + d_loss1
 
         return d_loss
+
+
+if __name__ == "__main__":
+
+    data = tf.placeholder(tf.float32, shape=(1, 416, 416, 3))
+    lr_img = tf.placeholder(tf.float32, shape=(1, 104, 104, 3))
+
+
+    # print(data)
+    # print(lr_img)
+    model = yolo(config.norm_epsilon, config.norm_decay, '../model_data/yolo_anchors.txt',
+                 '../model_data/coco_classes.txt',
+                 config.pre_train)
+    g1 = model.GAN_g1(lr_img)
+    g2 = model.GAN_g2(g1)
+    out = model.yolo_inference(g2.outputs, config.num_anchors / 3, config.num_classes, training=True)
+
+
+    # tf.summary.scalar('out', out)
+    # tf.summary.scalar('g1', g1.outputs)
+    # merged_summary_op = tf.summary.merge_all()
+
+    data1 = Image.open("../dog.jpg")
+    data1 = utils.letterbox_image(data1, (104, 104))
+    data1 = np.array(data1, dtype=np.float32)
+    data1 /= 255.
+    data1 = np.expand_dims(data1, axis=0)
+    # print(data1.shape)
+
+    # loss = model.yolo_loss(output, bbox_true, model.anchors, config.num_classes, config.ignore_thresh)
+
+
+    with tf.Session() as sess:
+        # data1 = cv2.imread('../dog.jpg')
+        # data1 = cv2.cvtColor(data1, cv2.COLOR_BGR2RGB)
+        # data1 = cv2.resize(data1, (416, 416))
+        # lr_img1 = cv2.resize(data1, (104, 104), interpolation=cv2.INTER_CUBIC)
+        # data1 = tf.cast(tf.expand_dims(tf.constant(data1), 0), tf.float32)
+        # lr_img1 = tf.cast(tf.expand_dims(tf.constant(lr_img1), 0), tf.float32)
+
+        sess.run(tf.global_variables_initializer())
+        out[0].print_params()
+        # print(sess.run(lr_img))
+        # print(lr_img)
+        # print(data1.shape)
+        print(sess.run(out, feed_dict={lr_img: data1}))
+        # sum = sess.run(merged_summary_op, feed_dict={lr_img: data1})
+        # summary_writer = tf.summary.FileWriter(config.log_dir, sess.graph)
+
+        # summary_writer.add_summary(sum)
+        # summary_writer.flush()

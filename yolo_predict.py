@@ -204,7 +204,7 @@ class yolo_predictor:
         return box_xy, box_wh, box_confidence, box_class_probs
 
 
-    def predict(self, inputs, image_shape, is_reuse):
+    def predict(self, inputs, image_shape):
         """
         Introduction
         ------------
@@ -220,6 +220,6 @@ class yolo_predictor:
             classes: 物体类别
         """
         model = yolo(config.norm_epsilon, config.norm_decay, self.anchors_path, self.classes_path, pre_train = False)
-        output = model.yolo_inference(inputs, config.num_anchors // 3, config.num_classes, reuse=is_reuse, training=False)
+        output = model.yolo_inference(inputs, config.num_anchors // 3, config.num_classes, training=False)
         boxes, scores, classes = self.eval(output, image_shape, max_boxes=20)
         return boxes, scores, classes

@@ -1,3 +1,5 @@
+train_batch_size = 64
+val_batch_size = 128
 num_parallel_calls = 4
 input_shape = 96
 max_boxes = 20
@@ -14,8 +16,6 @@ num_classes = 80
 training = True
 ignore_thresh = .5
 learning_rate = 0.001
-train_batch_size = 64
-val_batch_size = 128
 train_num = 118287
 val_num = 5000
 # Epoch = 9
@@ -24,7 +24,7 @@ obj_threshold = 0.3
 nms_threshold = 0.5
 gpu_index = "0"
 # log_dir = './logs'
-log_dir = './logs/logs-7'
+log_dir = './logs/logs-8'
 
 data_dir = './model_data'
 voc_dir = 'VOCROOT'
@@ -32,11 +32,13 @@ voc2007_dir = 'VOCROOT/VOC2007'
 voc2007test_dir = 'VOCROOT/VOC2007TEST'
 voc2012_dir = 'VOCROOT/VOC2012'
 
-model_dir = './test_model/model.ckpt-7'
+model_dir = './test_model/model.ckpt-8'
 pre_train_yolo3 = False
 yolo3_weights_path = './model_data/yolov3.weights'
 darknet53_weights_path = './model_data/darknet53.weights'
 anchors_path = './model_data/yolo_anchors.txt'
+# anchors_path1 = './model_data/yolo_anchors1.txt'
+
 classes_path = './model_data/coco_classes.txt'
 train_data_file = './dataset/coco/train2017'
 val_data_file = './dataset/coco/val2017'
