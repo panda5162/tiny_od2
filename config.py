@@ -1,4 +1,4 @@
-train_batch_size = 16
+train_batch_size = 32
 
 val_batch_size = 1
 num_parallel_calls = 4
