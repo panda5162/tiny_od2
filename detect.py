@@ -8,8 +8,7 @@ from PIL import Image, ImageFont, ImageDraw
 from utils import letterbox_image, load_weights
 
 # 指定使用GPU的Index
-# os.environ["CUDA_VISIBLE_DEVICES"] = config.gpu_index
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = config.gpu_index
 
 
 def detect(image_path, model_path, yolo_weights = None):
@@ -23,14 +22,18 @@ def detect(image_path, model_path, yolo_weights = None):
         image_path: 图片路径
     """
     image = Image.open(image_path)
-    resize_image = letterbox_image(image, (416, 416))
+    resize_image = letterbox_image(image, (192, 192))
     image_data = np.array(resize_image, dtype = np.float32)
     image_data /= 255.
     image_data = np.expand_dims(image_data, axis = 0)
     input_image_shape = tf.placeholder(dtype = tf.int32, shape = (2,))
-    input_image = tf.placeholder(shape = [None, 416, 416, 3], dtype = tf.float32)
-    predictor = yolo_predictor(config.obj_threshold, config.nms_threshold, config.classes_path, config.anchors_path)
-    boxes, scores, classes = predictor.predict(input_image, input_image_shape, is_reuse=False)
+    input_image = tf.placeholder(shape = [None, 192, 192, 3], dtype = tf.float32)
+
+    with tf.variable_scope("model_gd"):
+        predictor = yolo_predictor(config.obj_threshold, config.nms_threshold, config.classes_path,
+                                   config.anchors_path2)
+        boxes, scores, classes = predictor.predict(input_image, input_image_shape)
+
     with tf.Session() as sess:
         if yolo_weights is not None:
             with tf.variable_scope('predict'):
@@ -87,6 +90,7 @@ def detect(image_path, model_path, yolo_weights = None):
                 [tuple(text_origin), tuple(text_origin + label_size)],
                 fill = predictor.colors[c])
             draw.text(text_origin, label, fill=(0, 0, 0), font=font)
+            draw.text(text_origin, label, fill=(0, 0, 0), font=font)
             del draw
         image.show()
         image.save('./res/1.jpg')
@@ -98,6 +102,6 @@ if __name__ == '__main__':
     # )
     # FLAGS = parser.parse_args()
     if config.pre_train_yolo3 == True:
-        detect('./model_data/000000000036.jpg', config.model_dir, config.yolo3_weights_path)
+        detect('./dog.jpg', config.model_dir, config.yolo3_weights_path)
     else:
-        detect('./model_data/000000000036.jpg', config.model_dir)
+        detect('./dog.jpg', config.model_dir)

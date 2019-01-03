@@ -45,7 +45,7 @@ def train():
     # with tf.variable_scope(tf.get_variable_scope(), reuse=False):
 
     #-----------------------train_data-------------------------
-    train_reader = Reader('train', config.data_dir, config.anchors_path, config.num_classes,
+    train_reader = Reader('train', config.data_dir, config.anchors_path2, config.num_classes,
                           input_shape=config.input_shape, max_boxes=config.max_boxes)
     train_data = train_reader.build_dataset(config.train_batch_size)
     is_training = tf.placeholder(tf.bool, shape=[])
@@ -69,7 +69,7 @@ def train():
     draw_box(images, bbox)
 
     #------------------------------model---------------------------------
-    model = yolo(config.norm_epsilon, config.norm_decay, config.anchors_path, config.classes_path,
+    model = yolo(config.norm_epsilon, config.norm_decay, config.anchors_path2, config.classes_path,
                  config.pre_train)
     # with tf.variable_scope("train_var"):
     # g_img1 = model.GAN_g1(lr_images)
@@ -103,8 +103,8 @@ def train():
     mse_loss2 = tf.reduce_sum(mse_loss2) / tf.cast(tf.shape(net_g.outputs)[0], tf.float32)
     mse_loss = mse_loss1 + mse_loss2
     # clc_loss = 2e-6 * d_loss2
-    # clc_loss = d_loss2
-    g_loss = mse_loss + adv_loss
+    clc_loss = model.yolo_loss(d_fake, bbox_true, model.anchors, config.num_classes, 1, config.ignore_thresh)
+    g_loss = mse_loss + adv_loss + clc_loss
     l2_loss = tf.losses.get_regularization_loss()
     g_loss += l2_loss
 
@@ -127,7 +127,7 @@ def train():
             train_varg1 = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model_gd/generator/generator1')
             train_varg2 = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model_gd/generator/generator2')
             train_varg = train_varg1 + train_varg2
-            print(train_varg)
+            # print(train_varg)
             train_vard = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model_gd/yolo_inference/discriminator')
             # print(train_vard)
 
@@ -154,32 +154,36 @@ def train():
             load_ops = load_weights(tf.global_variables(scope='darknet53'), config.darknet53_weights_path)
             sess.run(load_ops)
         summary_writer = tf.summary.FileWriter(config.log_dir, sess.graph)
-
+        dloss_value = 0
+        gloss_value = 0
         for epoch in range(config.Epoch):
             for step in range(int(config.train_num / config.train_batch_size)):
                 start_time = time.time()
                 train_dloss, summary, global_step_value, _ = sess.run([d_loss, merged_summary, global_step, train_opd], {is_training : True})
                 train_gloss, summary, global_step_value, _ = sess.run([g_loss, merged_summary, global_step, train_opg], {is_training : True})
-                # dloss_value += train_dloss
-                # gloss_value += train_gloss
+                dloss_value += train_dloss
+                gloss_value += train_gloss
                 duration = time.time() - start_time
                 examples_per_sec = float(duration) / config.train_batch_size
+                print(global_step_value)
 
     #------------------------print(epoch)--------------------------
                 format_str1 = ('Epoch {} step {},  train dloss = {} train gloss = {} ( {} examples/sec; {} ''sec/batch)')
-                # print(format_str1.format(epoch, step, dloss_value / global_step_value, gloss_value / global_step_value, examples_per_sec, duration))
-                print(format_str1.format(epoch, step, train_dloss, train_gloss, examples_per_sec, duration))
+                print(format_str1.format(epoch, step, dloss_value / global_step_value, gloss_value / global_step_value, examples_per_sec, duration))
+                # print(format_str1.format(epoch, step, train_dloss, train_gloss, examples_per_sec, duration))
 
     #----------------------------summary loss------------------------
                 summary_writer.add_summary(summary=tf.Summary(value=[tf.Summary.Value(tag = "train dloss", simple_value = train_dloss)]), global_step = step)
                 summary_writer.add_summary(summary=tf.Summary(value=[tf.Summary.Value(tag = "train gloss", simple_value = train_gloss)]), global_step = step)
                 summary_writer.add_summary(summary, step)
                 summary_writer.flush()
-            # 每3个epoch保存一次模型
-            # if epoch % 3 == 0:
+
     #--------------------------save model------------------------------
-            checkpoint_path = os.path.join(config.model_dir, 'model.ckpt')
-            saver.save(sess, checkpoint_path, global_step=global_step)
+            # 每3个epoch保存一次模型
+            if epoch % 3 == 0:
+                checkpoint_path = os.path.join(config.model_dir, 'model.ckpt')
+                saver.save(sess, checkpoint_path, global_step = global_step)
+
 
 
 
@@ -193,22 +197,24 @@ def eval(model_path, min_Iou = 0.5, yolo_weights=None):
     class_pred = defaultdict(list)
     gt_counter_per_class = defaultdict(int)
     input_image_shape = tf.placeholder(dtype=tf.int32, shape=(2,))
-    input_image = tf.placeholder(shape=[None, 416, 416, 3], dtype=tf.float32)
+    input_image = tf.placeholder(shape=[None, 192, 192, 3], dtype=tf.float32)
 
-    model = yolo(config.norm_epsilon, config.norm_decay, config.anchors_path, config.classes_path,
-                 config.pre_train)
-    g_img = model.GAN_g(input_image, mask=True)
+    # model = yolo(config.norm_epsilon, config.norm_decay, config.anchors_path, config.classes_path,
+    #              config.pre_train)
+    with tf.variable_scope("model_gd"):
+        # g_img = model.GAN_g(input_image, mask=True)
 
-
-    predictor = yolo_predictor(config.obj_threshold, config.nms_threshold, config.classes_path, config.anchors_path1)
-    boxes, scores, classes = predictor.predict(g_img.outputs, input_image_shape)
-    val_Reader = Reader("val", config.data_dir, config.anchors_path, config.num_classes, input_shape=config.input_shape,
+        predictor = yolo_predictor(config.obj_threshold, config.nms_threshold, config.classes_path, config.anchors_path2)
+        boxes, scores, classes = predictor.predict(input_image, input_image_shape)
+        for ele1 in tf.trainable_variables():
+            print(ele1.name)
+    val_Reader = Reader("val", config.data_dir, config.anchors_path2, config.num_classes, input_shape=config.input_shape,
                         max_boxes=config.max_boxes)
     image_files, bboxes_data = val_Reader.read_annotations()
     with tf.Session() as sess:
         if yolo_weights is not None:
             with tf.variable_scope('predict'):
-                boxes, scores, classes = predictor.predict(g_img.outputs, input_image_shape)
+                boxes, scores, classes = predictor.predict(input_image, input_image_shape)
             load_op = load_weights(tf.global_variables(scope='predict'), weights_file=yolo_weights)
             sess.run(load_op)
         else:
@@ -230,14 +236,16 @@ def eval(model_path, min_Iou = 0.5, yolo_weights=None):
                 # print(gt_counter_per_class[class_name])
 
             ground_truth[file_id] = val_bboxes
-            for ele1 in tf.trainable_variables():
-                print(ele1.name)
+            # for ele1 in tf.trainable_variables():
+            #     print(ele1.name)
 
             image = Image.open(image_file)
-            resize_image = letterbox_image(image, (416, 416))
+            resize_image = letterbox_image(image, (192, 192))
             image_data = np.array(resize_image, dtype=np.float32)
             image_data /= 255.
             image_data = np.expand_dims(image_data, axis=0)
+            # print(image_data)
+
 
             out_boxes, out_scores, out_classes = sess.run(
                 [boxes, scores, classes],
@@ -245,6 +253,11 @@ def eval(model_path, min_Iou = 0.5, yolo_weights=None):
                     input_image: image_data,
                     input_image_shape: [image.size[1], image.size[0]]
                 })
+            # print(out_boxes)
+            print(image_file)
+            print(out_scores)
+            print(out_classes)
+
             print("detect {}/{} found boxes: {}".format(index, len(image_files), len(out_boxes)))
 
             for o, c in enumerate(out_classes):

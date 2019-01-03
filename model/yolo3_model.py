@@ -470,7 +470,7 @@ class yolo:
         Parameters
         ----------
             yolo_output: yolo模型的输出
-            y_true: 经过预处理的真实标签，shape为[batch, grid_size, grid_size, 5 + num_classes]
+            y_true: 经过预处理的真实标签，shape为[batch, grid_size, grid_size, 3, 5 + num_classes]
             anchors: yolo模型对应的anchors
             num_classes: 类别数量
             ignore_thresh: 小于该阈值的box我们认为没有物体
@@ -484,14 +484,14 @@ class yolo:
 
         anchor_mask = [[6, 7, 8], [3, 4, 5], [0, 1, 2]]
         # input_shape = [416.0, 416.0]
-        input_shape = [96.0, 96.0]
+        input_shape = [192.0, 192.0]
         grid_shapes = [tf.cast(tf.shape(yolo_output[l])[1:3], tf.float32) for l in range(3)]
         for index in range(3):
             # 只有负责预测ground truth box的grid对应的为1, 才计算相对应的loss
             # object_mask的shape为[batch_size, grid_size, grid_size, 3, 1]
             object_mask = y_true[index][..., 4:5]
             class_probs = y_true[index][..., 5:]
-            grid, predictions, pred_xy, pred_wh = self.yolo_head(yolo_output[index], anchors[anchor_mask[index]], num_classes, input_shape, training = True)
+            grid, predictions, pred_xy, pred_wh = self.yolo_head(yolo_output[index], anchors[anchor_mask[index]], num_classes, input_shape, training=True)
             # pred_box的shape为[batch, box_num, 4]
             pred_box = tf.concat([pred_xy, pred_wh], axis = -1)
             raw_true_xy = y_true[index][..., :2] * grid_shapes[index][::-1] - grid

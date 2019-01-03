@@ -78,10 +78,12 @@ class yolo_predictor:
         anchor_mask = [[6, 7, 8], [3, 4, 5], [0, 1, 2]]
         boxes = []
         box_scores = []
-        input_shape = tf.shape(yolo_outputs[0])[1 : 3] * 32
+        input_shape = tf.shape(yolo_outputs[2])[1:3] * 32
+
         # 对三个尺度的输出获取每个预测box坐标和box的分数，score计算为置信度x类别概率
         for i in range(len(yolo_outputs)-1):
             _boxes, _box_scores = self.boxes_and_scores(yolo_outputs[i], self.anchors[anchor_mask[i]], len(self.class_names), input_shape, image_shape)
+            print(_boxes)
             boxes.append(_boxes)
             box_scores.append(_box_scores)
         boxes = tf.concat(boxes, axis = 0)
