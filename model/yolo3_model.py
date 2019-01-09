@@ -38,10 +38,10 @@ class yolo:
         self.anchors = self._get_anchors()
         self.classes = self._get_class()
 
-    def GAN_g1(self, t_image, is_train=False, reuse=False):
+    def GAN_g1(self, t_image, is_train=False):
         # if reuse:
         #     tf.get_variable_scope().reuse_variables()
-        with tf.variable_scope("generator1", reuse=reuse):
+        with tf.variable_scope("generator1", reuse=tf.AUTO_REUSE):
             w_init = tf.random_normal_initializer(stddev=0.02)
             b_init = None  # tf.constant_initializer(value=0.0)
             g_init = tf.random_normal_initializer(1., 0.02)
@@ -62,8 +62,8 @@ class yolo:
             # tf.summary.image('GAN_g1', n, max_outputs=3)
             return n
 
-    def GAN_g2(self, t_image, is_train=False, reuse=False):
-        with tf.variable_scope("generator2", reuse=reuse):
+    def GAN_g2(self, t_image, is_train=False):
+        with tf.variable_scope("generator2", reuse=tf.AUTO_REUSE):
             w_init = tf.random_normal_initializer(stddev=0.02)
             b_init = None  # tf.constant_initializer(value=0.0)
             g_init = tf.random_normal_initializer(1., 0.02)
@@ -83,13 +83,13 @@ class yolo:
             n = Conv2d(n, 3, (1, 1), (1, 1), act=None, padding='SAME', W_init=w_init, name='g2_n3s1/c')
             return n
 
-    def GAN_g(self, t_image, is_train=False, reuse=False, mask=False):
-        with tf.variable_scope("generator"):
+    def GAN_g(self, t_image, is_train=False, mask=False):
+        with tf.variable_scope("generator", reuse=tf.AUTO_REUSE):
             print(tf.get_variable_scope().name)
-            n = self.GAN_g1(t_image, is_train, reuse=reuse)
+            n = self.GAN_g1(t_image, is_train)
             # gan_g.reuse_variables()
             if mask:
-                n = self.GAN_g2(n.outputs, is_train, reuse=False)
+                n = self.GAN_g2(n.outputs, is_train)
                 # for ele1 in tf.trainable_variables():
                 #     print(ele1.name)
                 return n
@@ -305,7 +305,7 @@ class yolo:
             num_classes: 类别数量
             training: 是否为训练模式
         """
-        with tf.variable_scope("yolo_inference"):
+        with tf.variable_scope("yolo_inference", reuse=tf.AUTO_REUSE):
             conv_index = 1
             conv2d_26, conv2d_43, conv, conv_index = self._darknet53(inputs, conv_index, training=training,
                                                                      norm_decay=self.norm_decay,
@@ -483,8 +483,8 @@ class yolo:
         d_loss2 = 0
 
         anchor_mask = [[6, 7, 8], [3, 4, 5], [0, 1, 2]]
-        # input_shape = [416.0, 416.0]
-        input_shape = [192.0, 192.0]
+        # input_shape = [192.0, 192.0]
+        input_shape = [416.0, 416.0]
         grid_shapes = [tf.cast(tf.shape(yolo_output[l])[1:3], tf.float32) for l in range(3)]
         for index in range(3):
             # 只有负责预测ground truth box的grid对应的为1, 才计算相对应的loss

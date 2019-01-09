@@ -25,7 +25,9 @@ def load_weights(var_list, weights_file):
     ptr = 0
     i = 0
     assign_ops = []
-    while i < len(var_list) - 1:
+    print(len(var_list) - 1)
+    # while i < len(var_list) - 1:
+    while i < 259:
         var1 = var_list[i]
         var2 = var_list[i + 1]
         # do something only if we process conv layer

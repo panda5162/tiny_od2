@@ -15,159 +15,208 @@ from tensorflow.python import debug as tf_debug
 import numpy
 
 # 指定使用GPU的Index
-os.environ["CUDA_VISIBLE_DEVICES"] = config.gpu_index
+# os.environ["CUDA_VISIBLE_DEVICES"] = config.gpu_index
 beta1 = config.beta1
 alpha = config.alpha
 beta = config.beta
 
+def average_gradients(tower_grads):
+    average_grads = []
+    for grad_and_vars in zip(*tower_grads):
+        grads = []
+        for g, _ in grad_and_vars:
+            expend_g = tf.expand_dims(g, 0)
+            grads.append(expend_g)
+        grad = tf.concat(grads, 0)
+        grad = tf.reduce_mean(grad, 0)
+        v = grad_and_vars[0][1]
+        grad_and_var = (grad, v)
+        average_grads.append(grad_and_var)
+    return average_grads
 
 def train():
+    with tf.device("/cpu:0"):
+        # ----------------------optimizer---------------------------
+        global_step = tf.Variable(0, trainable=False)
+        lr = tf.train.exponential_decay(config.learning_rate, global_step, decay_steps=2000, decay_rate=0.8)
+        optimizer = tf.train.AdamOptimizer(learning_rate=lr)
+        is_training = tf.placeholder(tf.bool, shape=[])
 
-    global_step = tf.Variable(0, trainable=False)
+        i = 0
+        tower_grads_g = []
+        tower_grads_d1 = []
+        train_reader = Reader('train', config.data_dir, config.anchors_path2, config.num_classes,
+                              input_shape=config.input_shape, max_boxes=config.max_boxes)
+        train_data = train_reader.build_dataset(config.train_batch_size)
+        iterator = train_data.make_one_shot_iterator()
 
-    is_training = tf.placeholder(tf.bool, shape=[])
+        with tf.variable_scope(tf.get_variable_scope()):
+            for d in ['/gpu:0', '/gpu:2']:
+                print(d)
+                with tf.device(d):
+                    with tf.name_scope("tower_%d" % i):
+                        images, bbox, bbox_true_13, bbox_true_26, bbox_true_52 = iterator.get_next()
 
-    train_reader = Reader('train', config.data_dir, config.anchors_path2, config.num_classes, input_shape=config.input_shape, max_boxes=config.max_boxes)
-    train_data = train_reader.build_dataset(config.train_batch_size)
-    iterator = train_data.make_one_shot_iterator()
-    images, bbox, bbox_true_13, bbox_true_26, bbox_true_52 = iterator.get_next()
+                        # -----------------------  definition-------------------------
+                        images.set_shape([None, config.input_shape, config.input_shape, 3])
+                        bbox.set_shape([None, config.max_boxes, 5])
+                        grid_shapes = [config.input_shape // 32, config.input_shape // 16, config.input_shape // 8]
+                        lr_images = tf.image.resize_images(images,
+                                                           size=[config.input_shape // 4, config.input_shape // 4],
+                                                           method=0, align_corners=False)
+                        lr_images.set_shape([None, config.input_shape // 4, config.input_shape // 4, 3])
+                        bbox_true_13.set_shape([None, grid_shapes[0], grid_shapes[0], 3, 5 + config.num_classes])
+                        bbox_true_26.set_shape([None, grid_shapes[1], grid_shapes[1], 3, 5 + config.num_classes])
+                        bbox_true_52.set_shape([None, grid_shapes[2], grid_shapes[2], 3, 5 + config.num_classes])
+                        bbox_true = [bbox_true_13, bbox_true_26, bbox_true_52]
+                        with tf.variable_scope("model_gd"):
+                            model = yolo(config.norm_epsilon, config.norm_decay, config.anchors_path2,
+                                         config.classes_path,
+                                         config.pre_train)
+                            net_g1 = model.GAN_g(lr_images, is_train=True, mask=False)
+                            tf.get_variable_scope().reuse_variables()
+                            # net_g = model.GAN_g(lr_images, is_train=True, reuse=True, mask=True)
 
-    # -----------------------  definition-------------------------
-    images.set_shape([None, config.input_shape, config.input_shape, 3])
-    bbox.set_shape([None, config.max_boxes, 5])
-    grid_shapes = [config.input_shape // 32, config.input_shape // 16, config.input_shape // 8]
-    lr_images = tf.image.resize_images(images, size=[config.input_shape // 4, config.input_shape // 4], method=0, align_corners=False)
-    lr_images.set_shape([None, config.input_shape // 4, config.input_shape // 4, 3])
-    bbox_true_13.set_shape([None, grid_shapes[0], grid_shapes[0], 3, 5 + config.num_classes])
-    bbox_true_26.set_shape([None, grid_shapes[1], grid_shapes[1], 3, 5 + config.num_classes])
-    bbox_true_52.set_shape([None, grid_shapes[2], grid_shapes[2], 3, 5 + config.num_classes])
-    bbox_true = [bbox_true_13, bbox_true_26, bbox_true_52]
+                            d_real = model.yolo_inference(images, config.num_anchors / 3, config.num_classes,
+                                                          training=True)
+                            tf.get_variable_scope().reuse_variables()
+                            # d_fake = model.yolo_inference(net_g.outputs, config.num_anchors / 3, config.num_classes, training=True)
+                            d_fake = model.yolo_inference(net_g1.outputs, config.num_anchors / 3, config.num_classes,
+                                                          training=True)
+                            # ---------------------------d_loss---------------------------------
+                            d_loss1 = model.yolo_loss(d_real, bbox_true, model.anchors, config.num_classes, 1,
+                                                      config.ignore_thresh)
+                            d_loss2 = model.yolo_loss(d_fake, bbox_true, model.anchors, config.num_classes, 0,
+                                                      config.ignore_thresh)
+                            d_loss = d_loss1 + d_loss2
+                            l2_loss = tf.losses.get_regularization_loss()
+                            d_loss += l2_loss
+
+                            # --------------------------g_loss------------------------------------
+                            adv_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.ones_like(d_fake[3]),
+                                                                               logits=d_fake[3])
+                            adv_loss = tf.reduce_sum(adv_loss) / tf.cast(tf.shape(d_fake[3])[0], tf.float32)
+                            mse_loss1 = tl.cost.mean_squared_error(net_g1.outputs, images, is_mean=True)
+                            mse_loss1 = tf.reduce_sum(mse_loss1) / tf.cast(tf.shape(net_g1.outputs)[0], tf.float32)
+                            # mse_loss2 = tl.cost.mean_squared_error(net_g.outputs, images, is_mean=True)
+                            # mse_loss2 = tf.reduce_sum(mse_loss2) / tf.cast(tf.shape(net_g.outputs)[0], tf.float32)
+                            # mse_loss = mse_loss1 + mse_loss2
+
+                            clc_loss = model.yolo_loss(d_fake, bbox_true, model.anchors, config.num_classes, 1,
+                                                       config.ignore_thresh)
+                            # g_loss = mse_loss + adv_loss + clc_loss
+                            g_loss = mse_loss1 + adv_loss + clc_loss
+                            l2_loss = tf.losses.get_regularization_loss()
+                            g_loss += l2_loss
+
+                            update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+                            # print(tf.all_variables())
+                            with tf.control_dependencies(update_ops):
+                                # if config.pre_train:
+                                # aaa = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='generator')
+                                train_varg1 = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
+                                                                scope='model_gd/generator/generator1')
+                                print(train_varg1)
+                                # train_varg2 = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model_gd/generator/generator2')
+                                # train_varg = train_varg1 + train_varg2
+
+                                train_vard1 = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
+                                                                scope='model_gd/yolo_inference/discriminator')
+                                # train_vard2 = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model_gd/yolo_inference/darknet53')
+                                # train_vard = train_vard1 + train_vard2
+
+                                # train_opg = optimizer.minimize(loss=g_loss, global_step=global_step, var_list=train_varg1)
+                                # train_opd1 = optimizer.minimize(loss=d_loss, global_step=global_step, var_list=train_vard1)
+                                # train_opd = optimizer.minimize(loss=d_loss, global_step=global_step, var_list=train_vard)
+
+                                # else:
+                                #     train_opd = optimizer.minimize(loss=d_loss, global_step=global_step)
+                                #     train_opg = optimizer.minimize(loss=g_loss, global_step=global_step)
+                            # print(train_varg1)
+                            grads_g = optimizer.compute_gradients(g_loss, var_list=train_varg1)
+                            tower_grads_g.append(grads_g)
+                            grads_d1 = optimizer.compute_gradients(d_loss, var_list=train_vard1)
+                            tower_grads_d1.append(grads_d1)
 
 
+                i += 1
 
+        grads_g = average_gradients(tower_grads_g)
+        grads_d1 = average_gradients(tower_grads_d1)
 
-    with tf.variable_scope("model_gd"):
-        model = yolo(config.norm_epsilon, config.norm_decay, config.anchors_path2, config.classes_path, config.pre_train)
-        net_g1 = model.GAN_g(lr_images, is_train=True, mask=False)
-        # net_g = model.GAN_g(lr_images, is_train=True, reuse=True, mask=True)
-
-        d_real = model.yolo_inference(images, config.num_anchors / 3, config.num_classes, training=True)
-        tf.get_variable_scope().reuse_variables()
-        # d_fake = model.yolo_inference(net_g.outputs, config.num_anchors / 3, config.num_classes, training=True)
-        d_fake = model.yolo_inference(net_g1.outputs, config.num_anchors / 3, config.num_classes, training=True)
-
-    # ---------------------------d_loss---------------------------------
-    d_loss1 = model.yolo_loss(d_real, bbox_true, model.anchors, config.num_classes, 1, config.ignore_thresh)
-    d_loss2 = model.yolo_loss(d_fake, bbox_true, model.anchors, config.num_classes, 0, config.ignore_thresh)
-    d_loss = d_loss1 + d_loss2
-    l2_loss = tf.losses.get_regularization_loss()
-    d_loss += l2_loss
-    # --------------------------g_loss------------------------------------
-    adv_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.ones_like(d_fake[3]), logits=d_fake[3])
-    adv_loss = tf.reduce_sum(adv_loss) / tf.cast(tf.shape(d_fake[3])[0], tf.float32)
-    mse_loss1 = tl.cost.mean_squared_error(net_g1.outputs, images, is_mean=True)
-    mse_loss1 = tf.reduce_sum(mse_loss1) / tf.cast(tf.shape(net_g1.outputs)[0], tf.float32)
-    # mse_loss2 = tl.cost.mean_squared_error(net_g.outputs, images, is_mean=True)
-    # mse_loss2 = tf.reduce_sum(mse_loss2) / tf.cast(tf.shape(net_g.outputs)[0], tf.float32)
-    # mse_loss = mse_loss1 + mse_loss2
-
-    clc_loss = model.yolo_loss(d_fake, bbox_true, model.anchors, config.num_classes, 1, config.ignore_thresh)
-    # g_loss = mse_loss + adv_loss + clc_loss
-    g_loss = mse_loss1 + adv_loss + clc_loss
-    l2_loss = tf.losses.get_regularization_loss()
-    g_loss += l2_loss
-
-    update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-    # print(tf.all_variables())
-    with tf.control_dependencies(update_ops):
-        # if config.pre_train:
-        # aaa = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='generator')
-        train_varg1 = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model_gd/generator/generator1')
-        # train_varg1 = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='generator1')
-        # train_varg2 = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model_gd/generator/generator2')
-        # train_varg = train_varg1 + train_varg2
-        train_vard1 = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model_gd/yolo_inference/discriminator')
-        # train_vard2 = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model_gd/yolo_inference/darknet53')
-        # train_vard = train_vard1 + train_vard2
-    lr = tf.train.exponential_decay(config.learning_rate, global_step, decay_steps=2000, decay_rate=0.8)
-    optimizer = tf.train.AdamOptimizer(learning_rate=lr)
-    train_opg = optimizer.minimize(loss=g_loss, global_step=global_step, var_list=train_varg1)
-    train_opd1 = optimizer.minimize(loss=d_loss, global_step=global_step, var_list=train_vard1)
-        # train_opd = optimizer.minimize(loss=d_loss, global_step=global_step, var_list=train_vard)
-        # else:
-        #     train_opd = optimizer.minimize(loss=d_loss, global_step=global_step)
-        #     train_opg = optimizer.minimize(loss=g_loss, global_step=global_step)
-    # print(train_varg1)
+        train_opg = optimizer.apply_gradients(grads_g, global_step=global_step)
+        train_opd1 = optimizer.apply_gradients(grads_d1, global_step=global_step)
 
         # -------------------------session-----------------------------------
-    with tf.Session(config=tf.ConfigProto(log_device_placement=False, allow_soft_placement=True)) as sess:
-        init = tf.global_variables_initializer()
-        sess.run(init)
-        # tl.layers.print_all_variables()
-        saver = tf.train.Saver()
-        ckpt = tf.train.get_checkpoint_state(config.model_dir)
-        if ckpt and tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
-            print('restore model', ckpt.model_checkpoint_path)
-            saver.restore(sess, ckpt.model_checkpoint_path)
-        # else:
-        #     sess.run(init)
-        if config.pre_train is True:
-            # print(tf.global_variables(scope='model_gd/yolo_inference/darknet53'))
-            load_ops = load_weights(tf.global_variables(scope='model_gd/yolo_inference/darknet53'), config.darknet53_weights_path)
-            sess.run(load_ops)
+        with tf.Session(config=tf.ConfigProto(log_device_placement=False, allow_soft_placement=True)) as sess:
+            # print(tf.GraphKeys.TRAINABLE_VARIABLES)
+            init = tf.global_variables_initializer()
+            sess.run(init)
+            # tl.layers.print_all_variables()
+            saver = tf.train.Saver()
+            ckpt = tf.train.get_checkpoint_state(config.model_dir)
+            if ckpt and tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
+                print('restore model', ckpt.model_checkpoint_path)
+                saver.restore(sess, ckpt.model_checkpoint_path)
 
-        dloss_value = 0
-        gloss_value = 0
-        for epoch in range(config.Epoch):
-            for step in range(int(config.train_num / (config.train_batch_size * 2))):
-                start_time = time.time()
-                # train_dloss, summary, global_step_value, _ = sess.run([d_loss, merged_summary, global_step, train_opd1], {is_training : True})
-                # train_gloss, summary, global_step_value, _ = sess.run([g_loss, merged_summary, global_step, train_opg], {is_training : True})
-                train_dloss, global_step_value, _ = sess.run([d_loss, global_step, train_opd1], {is_training: True})
-                train_gloss, global_step_value, _ = sess.run([g_loss, global_step, train_opg], {is_training: True})
+            if config.pre_train is True:
+                load_ops = load_weights(tf.global_variables(scope='model_gd/yolo_inference/darknet53'),
+                                        config.darknet53_weights_path)
+                sess.run(load_ops)
 
-                dloss_value += train_dloss
-                gloss_value += train_gloss
-                duration = time.time() - start_time
-                examples_per_sec = float(duration) / config.train_batch_size
-                print(global_step_value / 2)
-                tmp_global_step = global_step_value / 2
+            dloss_value = 0
+            gloss_value = 0
+            for epoch in range(config.Epoch):
+                for step in range(int(config.train_num / (config.train_batch_size * 2))):
+                    start_time = time.time()
+                    # train_dloss, summary, global_step_value, _ = sess.run([d_loss, merged_summary, global_step, train_opd1], {is_training : True})
+                    # train_gloss, summary, global_step_value, _ = sess.run([g_loss, merged_summary, global_step, train_opg], {is_training : True})
+                    train_dloss, global_step_value, _ = sess.run([d_loss, global_step, train_opd1], {is_training: True})
+                    train_gloss, global_step_value, _ = sess.run([g_loss, global_step, train_opg], {is_training: True})
 
-                # ------------------------print(epoch)--------------------------
-                format_str1 = ( 'Epoch {} step {}, train dloss = {}, train gloss = {} ( {} examples/sec; {} ''sec/batch)')
-                print(format_str1.format(epoch, step, dloss_value / tmp_global_step, gloss_value / tmp_global_step, examples_per_sec, duration))
+                    dloss_value += train_dloss
+                    gloss_value += train_gloss
+                    duration = time.time() - start_time
+                    examples_per_sec = float(duration) / (config.train_batch_size *2)
+                    print(global_step_value)
+                    tmp_global_step = global_step_value / 2
 
-            # --------------------------save model------------------------------
-            # 每3个epoch保存一次模型
-            if epoch % 3 == 0:
-                checkpoint_path = os.path.join(config.model_dir, 'model.ckpt')
-                saver.save(sess, checkpoint_path, global_step=global_step)
-            print(dloss_value)
-            print(gloss_value)
+                    # ------------------------print(epoch)--------------------------
+                    format_str1 = (
+                        'Epoch {} step {},  train dloss = {} train gloss = {} ( {} examples/sec; {} ''sec/batch)')
+                    print(format_str1.format(epoch, step, dloss_value / tmp_global_step, gloss_value / tmp_global_step,
+                                             examples_per_sec, duration))
+                    #
+                # --------------------------save model------------------------------
+                # 每3个epoch保存一次模型
+                if epoch % 3 == 0:
+                    checkpoint_path = os.path.join(config.model_dir, 'model.ckpt')
+                    saver.save(sess, checkpoint_path, global_step=global_step)
+                print(dloss_value)
+                print(gloss_value)
 
-    #     dloss_value = 0
-    #     gloss_value = 0
-    #     for epoch in range(config.Epoch1):
-    #         for step in range(int(config.train_num / config.train_batch_size)):
-    #             start_time = time.time()
-    #             train_dloss, summary, global_step_value, _ = sess.run([d_loss, merged_summary, global_step, train_opd], {is_training : True})
-    #             train_gloss, summary, global_step_value, _ = sess.run([g_loss, merged_summary, global_step, train_opg], {is_training : True})
-    #             dloss_value += train_dloss
-    #             gloss_value += train_gloss
-    #             duration = time.time() - start_time
-    #             examples_per_sec = float(duration) / config.train_batch_size
-    #             print(global_step_value)
-    #
-    # #------------------------print(epoch)--------------------------
-    #             format_str1 = ('Epoch {} step {},  train dloss = {} train gloss = {} ( {} examples/sec; {} ''sec/batch)')
-    #             print(format_str1.format(epoch, step, dloss_value / global_step_value, gloss_value / global_step_value, examples_per_sec, duration))
-    #
-    # #--------------------------save model------------------------------
-    #         # 每3个epoch保存一次模型
-    #         if epoch % 3 == 0:
-    #             checkpoint_path = os.path.join(config.model_dir, 'model.ckpt')
-    #             saver.save(sess, checkpoint_path, global_step = global_step)
-
+        #     dloss_value = 0
+        #     gloss_value = 0
+        #     for epoch in range(config.Epoch1):
+        #         for step in range(int(config.train_num / config.train_batch_size)):
+        #             start_time = time.time()
+        #             train_dloss, summary, global_step_value, _ = sess.run([d_loss, merged_summary, global_step, train_opd], {is_training : True})
+        #             train_gloss, summary, global_step_value, _ = sess.run([g_loss, merged_summary, global_step, train_opg], {is_training : True})
+        #             dloss_value += train_dloss
+        #             gloss_value += train_gloss
+        #             duration = time.time() - start_time
+        #             examples_per_sec = float(duration) / config.train_batch_size
+        #             print(global_step_value)
+        #
+        # #------------------------print(epoch)--------------------------
+        #             format_str1 = ('Epoch {} step {},  train dloss = {} train gloss = {} ( {} examples/sec; {} ''sec/batch)')
+        #             print(format_str1.format(epoch, step, dloss_value / global_step_value, gloss_value / global_step_value, examples_per_sec, duration))
+        #
+        # #--------------------------save model------------------------------
+        #         # 每3个epoch保存一次模型
+        #         if epoch % 3 == 0:
+        #             checkpoint_path = os.path.join(config.model_dir, 'model.ckpt')
+        #             saver.save(sess, checkpoint_path, global_step = global_step)
 
 
 def eval(model_path, min_Iou = 0.5, yolo_weights=None):
@@ -468,57 +517,3 @@ if __name__ == "__main__":
     # eval(config.model_dir, yolo_weights = config.yolo3_weights_path)
     # eval(config.model_dir, yolo_weights=None)
 
-
-#
-# def check_available_gpus():
-#     local_devices = device_lib.list_local_devices()
-#     gpu_names = [x.name for x in local_devices if x.device_type == 'GPU']
-#     gpu_num = len(gpu_names)
-#
-#     print('{0} GPUs are detected : {1}'.format(gpu_num, gpu_names))
-#
-#     return gpu_num
-
-
-# gpu_num = check_available_gpus()
-    #
-    # for gpu_id in range(int(gpu_num)):
-    # with tf.device(tf.DeviceSpec(device_type="GPU", device_index=gpu_id)):
-
-        # with tf.variable_scope(tf.get_variable_scope(), reuse=(gpu_id > 0)):
-    # with tf.variable_scope(tf.get_variable_scope(), reuse=False):
-
-
- # with tf.variable_scope("train_var"):
-                # g_img1 = model.GAN_g1(lr_images)
-                # print(g_img1.outputs)
-                # tf.summary.image('img', g_img1.outputs, 3)
-                # g_img2 = model.GAN_g2(g_img1)
-                # print(model.g_variables)
-                # net_g1 = model.GAN_g1(lr_images, is_train=True)
-
-# ------------------------summary + draw-----------------------------------
-# tf.summary.image('input1', images, max_outputs=3)
-# draw_box(images, bbox)
-
-# adv_loss = 1e-3 * tf.reduce_sum(adv_loss) / tf.cast(tf.shape(d_fake[3])[0], tf.float32)
-
-
-
-    # ----------------summary loss-------------------------
-    # tf.summary.image('img', images, 3)
-    # tf.summary.scalar('d_loss', d_loss)
-    # tf.summary.scalar('g_loss', g_loss)
-    # merged_summary = tf.summary.merge_all()
-
-# sess = tf_debug.LocalCLIDebugWrapperSession(sess)
-# sess.add_tensor_filter("has_inf_or_nan", tf_debug.has_inf_or_nan)
-
-# summary_writer = tf.summary.FileWriter(config.log_dir, sess.graph)
-
-
-# ----------------------------summary loss------------------------
-# summary_writer.add_summary(summary=tf.Summary(value=[tf.Summary.Value(tag = "train dloss", simple_value = train_dloss)]), global_step = step)
-# summary_writer.add_summary(summary=tf.Summary(value=[tf.Summary.Value(tag = "train gloss", simple_value = train_gloss)]), global_step = step)
-# summary_writer.add_summary(summary, step)
-# summary_writer.flush()
